@@ -42,6 +42,7 @@ from functools import partial
 from dataset import SliceDataset
 from ShallowNet import shallowCNN
 from ENet import ENet
+from UNet import UNet
 from utils import (Dcm,
                    class2one_hot,
                    probs2one_hot,
@@ -86,7 +87,14 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    net = datasets_params[args.dataset]['net'](1, K, kernels=kernels, factor=factor)
+    if args.dataset in {'SEGTHOR', 'SEGTHOR_CLEAN'}:
+        model = {'enet': ENet, 'unet': UNet}[args.model or 'enet']
+    else:
+        if args.model is not None:
+            raise ValueError('--model can only be used with a SegTHOR dataset')
+        model = datasets_params[args.dataset]['net']
+
+    net = model(1, K, kernels=kernels, factor=factor)
     net.init_weights()
     net.to(device)
 
@@ -237,6 +245,8 @@ def main():
 
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
+    parser.add_argument('--model', choices=['enet', 'unet'], default=None,
+                        help="Model for a SegTHOR dataset (default: enet).")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
