@@ -67,14 +67,18 @@ class DoubleConv(nn.Module):
         self.sequence = nn.Sequential(
             nn.Conv2d(in_chan, out_chan, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_chan),
-            nn.ReLU(inplace=True),
             nn.Conv2d(out_chan, out_chan, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_chan),
-            nn.ReLU(inplace=True),
         )
+        self.shortcut = (nn.Identity() if in_chan == out_chan else
+                         nn.Sequential(
+                             nn.Conv2d(in_chan, out_chan, kernel_size=1, bias=False),
+                             nn.BatchNorm2d(out_chan),
+                         ))
+        self.activation = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        return self.sequence(x)
+        return self.activation(self.sequence(x) + self.shortcut(x))
 
 
 class MaxPool(nn.Module):

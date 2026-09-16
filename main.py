@@ -23,6 +23,7 @@
 # SOFTWARE.
 
 import argparse
+import random
 import warnings
 from typing import Any
 from pathlib import Path
@@ -243,6 +244,8 @@ def main():
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
     parser.add_argument('--model', choices=['enet', 'unet'], default=None,
                         help="Model to use for the selected dataset (default: dataset-specific).")
+    parser.add_argument('--seed', type=int, default=None,
+                        help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
@@ -253,6 +256,13 @@ def main():
                              "to test the logics around epochs and logging easily.")
 
     args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
 
     pprint(args)
 
