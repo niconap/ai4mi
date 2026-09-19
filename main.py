@@ -36,11 +36,14 @@ import numpy as np
 import torch.nn.functional as F
 from torch import nn, Tensor
 from torchvision import transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from functools import partial 
 
 from dataset import SliceDataset
+from sampling import (make_foreground_sampler,
+                      make_label_sampler,
+                      make_patient_sampler)
 from ShallowNet import shallowCNN
 from ENet import ENet
 from UNet import UNet
@@ -110,10 +113,70 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                              img_transform=img_transform,
                              gt_transform= partial(gt_transform, K),
                              debug=args.debug)
+
+    sampler = None
+    if args.sampling == 'uniform_replacement':
+        generator = torch.Generator()
+        generator.manual_seed(args.seed if args.seed is not None else 0)
+        sampler = WeightedRandomSampler(
+            weights=torch.ones(len(train_set), dtype=torch.double),
+            num_samples=len(train_set),
+            replacement=True,
+            generator=generator,
+        )
+    elif args.sampling == 'label':
+        if args.seed is None:
+            raise ValueError("Use --seed when testing label-aware sampling")
+
+        sampler, presence, active = make_label_sampler(
+            train_set.files,
+            seed=args.seed,
+            mixture=args.sampling_mixture,
+        )
+        active_labels = (np.flatnonzero(active) + 1).tolist()
+        original_rates = 100 * presence.mean(axis=0)
+        print(f">> Active sampling labels: {active_labels}")
+        print(
+            ">> Original positive-slice rates (%): "
+            + np.array2string(original_rates, precision=1)
+        )
+    elif args.sampling == 'foreground':
+        if args.seed is None:
+            raise ValueError("Use --seed when testing foreground sampling")
+
+        sampler, presence = make_foreground_sampler(
+            train_set.files,
+            seed=args.seed,
+            foreground_fraction=args.foreground_fraction,
+        )
+        original_foreground_rate = 100 * presence.any(axis=1).mean()
+        print(
+            f">> Original foreground-slice rate: "
+            f"{original_foreground_rate:.1f}%"
+        )
+        print(
+            f">> Target foreground-slice rate: "
+            f"{100 * args.foreground_fraction:.1f}%"
+        )
+    elif args.sampling == 'patient':
+        if args.seed is None:
+            raise ValueError("Use --seed when testing patient-balanced sampling")
+
+        sampler, _, patients, counts = make_patient_sampler(
+            train_set.files,
+            seed=args.seed,
+        )
+        print(f">> Patient-balanced sampling across {len(patients)} patients")
+        print(
+            f">> Original slices per patient: "
+            f"min={counts.min()}, max={counts.max()}"
+        )
+
     train_loader = DataLoader(train_set,
                               batch_size=B,
                               num_workers=5,
-                              shuffle=True)
+                              sampler=sampler,
+                              shuffle=sampler is None)
 
     val_set = SliceDataset('val',
                            root_dir,
@@ -248,6 +311,12 @@ def main():
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
+    parser.add_argument('--sampling',
+                        choices=['uniform', 'uniform_replacement', 'label',
+                                 'foreground', 'patient'],
+                        default='uniform')
+    parser.add_argument('--sampling-mixture', type=float, default=0.5)
+    parser.add_argument('--foreground-fraction', type=float, default=0.75)
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
 
