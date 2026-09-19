@@ -12,3 +12,5 @@ slurm_logs/
 *.err
 *.out
 comparison.png
+
+commands.md

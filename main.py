@@ -23,6 +23,7 @@
 # SOFTWARE.
 
 import argparse
+import json
 import random
 import warnings
 from typing import Any
@@ -41,6 +42,7 @@ from torch.utils.data import DataLoader
 from functools import partial 
 
 from dataset import SliceDataset
+from augmentation import EXPERIMENTS
 from ShallowNet import shallowCNN
 from ENet import ENet
 from UNet import UNet
@@ -108,7 +110,8 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                              root_dir,
                              img_transform=img_transform,
                              gt_transform= partial(gt_transform, K),
-                             debug=args.debug)
+                             debug=args.debug,
+                             experiment=args.experiment)
     train_loader = DataLoader(train_set,
                               batch_size=B,
                               num_workers=5,
@@ -118,13 +121,16 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                            root_dir,
                            img_transform=img_transform,
                            gt_transform=partial(gt_transform, K),
-                           debug=args.debug)
+                           debug=args.debug,
+                           experiment='B5' if args.experiment == 'B5' else 'B0')
     val_loader = DataLoader(val_set,
                             batch_size=B,
                             num_workers=5,
                             shuffle=False)
 
     args.dest.mkdir(parents=True, exist_ok=True)
+    (args.dest / "config.json").write_text(
+        json.dumps(vars(args), default=str, indent=2) + "\n")
 
     return (net, optimizer, device, train_loader, val_loader, K)
 
@@ -249,6 +255,9 @@ def main():
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
+
+    parser.add_argument('--experiment', choices=EXPERIMENTS, default='B0',
+                        help='Independent B0–B6 experiments')
 
     parser.add_argument('--gpu', action='store_true')
     parser.add_argument('--debug', action='store_true',
