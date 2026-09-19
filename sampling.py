@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 
-# Sampling strategies for the training slices.
-#
-# The loader draws every axial slice with equal probability by default, but a
-# third of them contain no organ at all, and the classes differ by two orders of
-# magnitude in size. These samplers redistribute the per-epoch budget without
-# touching the dataset, the loss, or the number of iterations per epoch.
-
 from pathlib import Path
 
 import numpy as np
