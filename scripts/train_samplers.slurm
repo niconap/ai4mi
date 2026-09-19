@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Submit with: sbatch scripts/train_samplers.slurm
-# Array tasks 0-4 uniform; 5-9 uniform_replacement; 10-14 label; 15-19 foreground; 20-24 patient.
-# Every strategy reuses seeds 1000-1004, so the runs are paired across strategies.
-# Override defaults, for example: EPOCHS=50 MODEL=unet sbatch scripts/train_samplers.slurm
 #SBATCH --job-name=ai4mi-sampling
 #SBATCH --partition=gpu_mig
 #SBATCH --array=0-24
