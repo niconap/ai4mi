@@ -7,3 +7,8 @@ ai4mi/
 __pycache__/
 
 projects
+.venv
+slurm_logs/
+*.err
+*.out
+comparison.png
