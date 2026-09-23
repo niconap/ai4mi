@@ -23,6 +23,7 @@
 # SOFTWARE.
 
 import argparse
+import json
 import random
 import warnings
 from typing import Any
@@ -41,10 +42,11 @@ from torch.utils.data import DataLoader
 from functools import partial 
 
 from dataset import SliceDataset
+from segthor_labels import decode_png, inspect_dataset
+from augmentation import EXPERIMENTS
 from ShallowNet import shallowCNN
 from ENet import ENet
 from UNet import UNet
-from ResUNetPP import ResUNetPP
 from utils import (Dcm,
                    class2one_hot,
                    probs2one_hot,
@@ -60,7 +62,7 @@ datasets_params: dict[str, dict[str, Any]] = {}
 # Avoids the classes with C (often used for the number of Channel)
 datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
-datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+datasets_params["SEGTHOR_FIXED"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 
 def img_transform(img):
         img = img.convert('L')
@@ -75,12 +77,21 @@ def gt_transform(K, img):
         # {0, 85, 170, 255} for 4 classes
         # {0, 51, 102, 153, 204, 255} for 6 classes
         # Very sketchy but that works here and that simplifies visualization
-        img = img / (255 / (K - 1)) if K != 5 else img / 63  # max <= 1
+        img = img / (255 / (K - 1)) if K != 5 else decode_png(img)
         img = torch.tensor(img, dtype=torch.int64)[None, ...]  # Add one dimension to simulate batch
         img = class2one_hot(img, K=K)
         return img[0]
 
 def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
+    root_dir = Path("data") / args.dataset
+    label_report = None
+    if args.dataset.startswith("SEGTHOR"):
+        label_report = inspect_dataset(
+            root_dir, require_separate=args.dataset == "SEGTHOR_FIXED")
+        if label_report["schema"] == "merged":
+            warnings.warn("Class 4 has no targets.")
+    if args.dest.exists() and any(args.dest.iterdir()):
+        raise ValueError(f"Result directory is not empty: {args.dest}; use a new destination.")
     # Networks and scheduler
     gpu: bool = args.gpu and torch.cuda.is_available()
     device = torch.device("cuda") if gpu else torch.device("cpu")
@@ -89,7 +100,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    models = {'enet': ENet, 'unet': UNet, 'resunetpp': ResUNetPP}
+    models = {'enet': ENet, 'unet': UNet}
     model = models[args.model] if args.model is not None else datasets_params[args.dataset]['net']
 
     net = model(1, K, kernels=kernels, factor=factor)
@@ -101,7 +112,6 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
 
     # Dataset part
     B: int = datasets_params[args.dataset]['B']
-    root_dir = Path("data") / args.dataset
 
 
 
@@ -109,7 +119,8 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                              root_dir,
                              img_transform=img_transform,
                              gt_transform= partial(gt_transform, K),
-                             debug=args.debug)
+                             debug=args.debug,
+                             experiment=args.experiment)
     train_loader = DataLoader(train_set,
                               batch_size=B,
                               num_workers=5,
@@ -119,13 +130,19 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                            root_dir,
                            img_transform=img_transform,
                            gt_transform=partial(gt_transform, K),
-                           debug=args.debug)
+                           debug=args.debug,
+                           experiment='B5' if args.experiment == 'B5' else 'B0')
     val_loader = DataLoader(val_set,
                             batch_size=B,
                             num_workers=5,
                             shuffle=False)
 
     args.dest.mkdir(parents=True, exist_ok=True)
+    if label_report is not None:
+        (args.dest / "label_schema.json").write_text(
+            json.dumps(label_report, indent=2) + "\n")
+    (args.dest / "config.json").write_text(
+        json.dumps(vars(args), default=str, indent=2) + "\n")
 
     return (net, optimizer, device, train_loader, val_loader, K)
 
@@ -243,13 +260,16 @@ def main():
 
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
-    parser.add_argument('--model', choices=['enet', 'unet', 'resunetpp'], default=None,
+    parser.add_argument('--model', choices=['enet', 'unet'], default=None,
                         help="Model to use for the selected dataset (default: dataset-specific).")
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
+
+    parser.add_argument('--experiment', choices=EXPERIMENTS, default='B0',
+                        help='Independent B0–B6 experiments')
 
     parser.add_argument('--gpu', action='store_true')
     parser.add_argument('--debug', action='store_true',
