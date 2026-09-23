@@ -28,6 +28,7 @@ from typing import Callable, Union
 from torch import Tensor
 from PIL import Image
 from torch.utils.data import Dataset
+from augmentation import SliceAugmentation, bilateral_denoise
 
 
 def make_dataset(root, subset) -> list[tuple[Path, Path | None]]:
@@ -51,11 +52,19 @@ def make_dataset(root, subset) -> list[tuple[Path, Path | None]]:
 
 class SliceDataset(Dataset):
     def __init__(self, subset, root_dir, img_transform=None,
-                 gt_transform=None, augment=False, equalize=False, debug=False):
+                 gt_transform=None, augment=False, equalize=False, debug=False,
+                 experiment="B0"):
+        if augment:
+            raise ValueError("Use experiment=B1 through B6 instead of augment=True")
+        if subset != "train" and experiment not in ("B0", "B5", "B6"):
+            raise ValueError("Augmentation is only allowed on the training split")
+        self.transform_pair = SliceAugmentation(experiment if subset == "train" else "B0")
+        self.denoising = experiment == "B5"
         self.root_dir: str = root_dir
         self.img_transform: Callable = img_transform
         self.gt_transform: Callable = gt_transform
-        self.augmentation: bool = augment
+        self.experiment: str = experiment
+        self.augmentation: bool = subset == "train" and experiment not in ("B0", "B5")
         self.equalize: bool = equalize
 
         self.test_mode: bool = subset == 'test'
@@ -73,12 +82,18 @@ class SliceDataset(Dataset):
         img_path, gt_path = self.files[index]
 
         img: Tensor = self.img_transform(Image.open(img_path))
+        # Deterministic preprocessing for B5
+        if self.denoising:
+            img = bilateral_denoise(img)
 
         data_dict = {"images": img,
                      "stems": img_path.stem}
 
         if not self.test_mode:
             gt: Tensor = self.gt_transform(Image.open(gt_path))
+
+            img, gt = self.transform_pair(img, gt)
+            data_dict["images"] = img
 
             _, W, H = img.shape
             K, _, _ = gt.shape
