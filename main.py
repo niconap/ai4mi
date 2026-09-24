@@ -47,6 +47,7 @@ from augmentation import EXPERIMENTS
 from ShallowNet import shallowCNN
 from ENet import ENet
 from UNet import UNet
+from ResUNetPP import ResUNetPP
 from utils import (Dcm,
                    class2one_hot,
                    probs2one_hot,
@@ -100,7 +101,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    models = {'enet': ENet, 'unet': UNet}
+    models = {'enet': ENet, 'unet': UNet, 'resunetpp': ResUNetPP}
     model = models[args.model] if args.model is not None else datasets_params[args.dataset]['net']
 
     net = model(1, K, kernels=kernels, factor=factor)
@@ -124,7 +125,8 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     train_loader = DataLoader(train_set,
                               batch_size=B,
                               num_workers=5,
-                              shuffle=True)
+                              shuffle=True,
+                              drop_last=True) #only for resunet
 
     val_set = SliceDataset('val',
                            root_dir,
@@ -260,7 +262,7 @@ def main():
 
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
-    parser.add_argument('--model', choices=['enet', 'unet'], default=None,
+    parser.add_argument('--model', choices=['enet', 'unet', 'resunetpp'], default=None,
                         help="Model to use for the selected dataset (default: dataset-specific).")
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
