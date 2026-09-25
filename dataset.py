@@ -24,7 +24,9 @@
 
 from pathlib import Path
 from typing import Callable, Union
+from collections import defaultdict
 
+import torch
 from torch import Tensor
 from PIL import Image
 from torch.utils.data import Dataset
@@ -53,7 +55,9 @@ def make_dataset(root, subset) -> list[tuple[Path, Path | None]]:
 class SliceDataset(Dataset):
     def __init__(self, subset, root_dir, img_transform=None,
                  gt_transform=None, augment=False, equalize=False, debug=False,
-                 experiment="B0"):
+                 experiment="B0", context_slices=1):
+        if context_slices < 1 or context_slices % 2 == 0:
+            raise ValueError("context_slices must be a positive odd number")
         if augment:
             raise ValueError("Use experiment=B1 through B6 instead of augment=True")
         if subset != "train" and experiment not in ("B0", "B5", "B6"):
@@ -64,6 +68,7 @@ class SliceDataset(Dataset):
         self.img_transform: Callable = img_transform
         self.gt_transform: Callable = gt_transform
         self.experiment: str = experiment
+        self.context_slices = context_slices
         self.augmentation: bool = subset == "train" and experiment not in ("B0", "B5")
         self.equalize: bool = equalize
 
@@ -73,6 +78,17 @@ class SliceDataset(Dataset):
         if debug:
             self.files = self.files[:10]
 
+        self._context_groups = defaultdict(list)
+        for file_index, (image_path, _) in enumerate(self.files):
+            stem_parts = image_path.stem.rsplit("_", 1)
+            group = stem_parts[0] if len(stem_parts) == 2 and stem_parts[1].isdigit() else image_path.stem
+            self._context_groups[group].append(file_index)
+        self._context_group_by_index = {
+            file_index: (group, position)
+            for group, indices in self._context_groups.items()
+            for position, file_index in enumerate(indices)
+        }
+
         print(f">> Created {subset} dataset with {len(self)} images...")
 
     def __len__(self):
@@ -81,7 +97,13 @@ class SliceDataset(Dataset):
     def __getitem__(self, index) -> dict[str, Union[Tensor, int, str]]:
         img_path, gt_path = self.files[index]
 
-        img: Tensor = self.img_transform(Image.open(img_path))
+        group, center = self._context_group_by_index[index]
+        group_indices = self._context_groups[group]
+        radius = self.context_slices // 2
+        context_indices = [group_indices[min(max(center + offset, 0), len(group_indices) - 1)]
+                   for offset in range(-radius, radius + 1)]
+        img = torch.cat([self.img_transform(Image.open(self.files[context_index][0]))
+                 for context_index in context_indices], dim=0)
         # Deterministic preprocessing for B5
         if self.denoising:
             img = bilateral_denoise(img)

@@ -47,6 +47,7 @@ from augmentation import EXPERIMENTS
 from ShallowNet import shallowCNN
 from ENet import ENet
 from UNet import UNet
+from TwoPointFiveD import TwoPointFiveD
 from utils import (Dcm,
                    class2one_hot,
                    probs2one_hot,
@@ -55,7 +56,7 @@ from utils import (Dcm,
                    dice_coef,
                    save_images)
 
-from losses import (CrossEntropy)
+from losses import make_loss
 
 datasets_params: dict[str, dict[str, Any]] = {}
 # K for the number of classes
@@ -100,10 +101,11 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    models = {'enet': ENet, 'unet': UNet}
+    models = {'enet': ENet, 'unet': UNet, 'unet25d': TwoPointFiveD}
     model = models[args.model] if args.model is not None else datasets_params[args.dataset]['net']
+    context_slices = args.context_slices if args.model == 'unet25d' else 1
 
-    net = model(1, K, kernels=kernels, factor=factor)
+    net = model(1, K, kernels=kernels, factor=factor, context_slices=context_slices)
     net.init_weights()
     net.to(device)
 
@@ -120,7 +122,8 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                              img_transform=img_transform,
                              gt_transform= partial(gt_transform, K),
                              debug=args.debug,
-                             experiment=args.experiment)
+                             experiment=args.experiment,
+                             context_slices=context_slices)
     train_loader = DataLoader(train_set,
                               batch_size=B,
                               num_workers=5,
@@ -131,7 +134,8 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                            img_transform=img_transform,
                            gt_transform=partial(gt_transform, K),
                            debug=args.debug,
-                           experiment='B5' if args.experiment == 'B5' else 'B0')
+                           experiment='B5' if args.experiment == 'B5' else 'B0',
+                           context_slices=context_slices)
     val_loader = DataLoader(val_set,
                             batch_size=B,
                             num_workers=5,
@@ -152,11 +156,12 @@ def runTraining(args):
     net, optimizer, device, train_loader, val_loader, K = setup(args)
 
     if args.mode == "full":
-        loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
+        idk = list(range(K))  # Supervise both background and foreground
     elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
-        loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
+        idk = [0, 1, 3, 4]  # Do not supervise the heart (class 2)
     else:
         raise ValueError(args.mode, args.dataset)
+    loss_fn = make_loss(args.loss, idk=idk)
 
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
@@ -260,11 +265,16 @@ def main():
 
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
-    parser.add_argument('--model', choices=['enet', 'unet'], default=None,
+    parser.add_argument('--model', choices=['enet', 'unet', 'unet25d'], default=None,
                         help="Model to use for the selected dataset (default: dataset-specific).")
+    parser.add_argument('--context-slices', type=int, default=3,
+                        help="Odd number of axial slices for the unet25d model.")
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
+    parser.add_argument('--loss', choices=['cross_entropy', 'dice', 'dice_cross_entropy'],
+                        default='cross_entropy',
+                        help="Training loss; dice_cross_entropy combines overlap and CE.")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
 

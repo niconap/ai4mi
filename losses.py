@@ -23,6 +23,7 @@
 # SOFTWARE.
 
 
+import torch
 from torch import einsum
 
 from utils import simplex, sset
@@ -46,6 +47,55 @@ class CrossEntropy():
         loss /= mask.sum() + 1e-10
 
         return loss
+
+
+class SoftDiceLoss:
+    """Multiclass soft Dice loss computed from probabilities."""
+
+    def __init__(self, *, idk, smooth=1e-5):
+        self.idk = idk
+        self.smooth = smooth
+        print(f"Initialized {self.__class__.__name__} with {idk=}, {smooth=}")
+
+    def __call__(self, pred_softmax, weak_target):
+        assert pred_softmax.shape == weak_target.shape
+        assert simplex(pred_softmax)
+        assert sset(weak_target, [0, 1])
+
+        prediction = pred_softmax[:, self.idk].float()
+        target = weak_target[:, self.idk].float()
+        intersection = (prediction * target).sum(dim=(0, 2, 3))
+        denominator = (prediction + target).sum(dim=(0, 2, 3))
+        dice = (2 * intersection + self.smooth) / (denominator + self.smooth)
+        return 1 - dice.mean()
+
+
+class DiceCrossEntropy:
+    """Weighted combination of the existing cross-entropy and soft Dice losses."""
+
+    def __init__(self, *, idk, dice_weight=0.5):
+        self.cross_entropy = CrossEntropy(idk=idk)
+        self.dice = SoftDiceLoss(idk=idk)
+        self.dice_weight = dice_weight
+        print(f"Initialized {self.__class__.__name__} with {dice_weight=}")
+
+    def __call__(self, pred_softmax, weak_target):
+        dice_weight = self.dice_weight
+        return ((1 - dice_weight) * self.cross_entropy(pred_softmax, weak_target)
+                + dice_weight * self.dice(pred_softmax, weak_target))
+
+
+def make_loss(name, *, idk):
+    losses = {
+        "cross_entropy": CrossEntropy,
+        "dice": SoftDiceLoss,
+        "dice_cross_entropy": DiceCrossEntropy,
+    }
+    try:
+        loss_class = losses[name]
+    except KeyError as error:
+        raise ValueError(f"Unknown loss: {name}") from error
+    return loss_class(idk=idk)
 
 
 class PartialCrossEntropy(CrossEntropy):
