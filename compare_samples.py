@@ -38,29 +38,65 @@ def plot_average_metrics(args: argparse.Namespace) -> None:
         model: {
             "dice": average_root / model / "dice_val_mean.npy",
             "loss": average_root / model / "loss_val_mean.npy",
+            "iou": average_root / model / "iou_val_mean.npy",
+            "hd95": (average_root / model / "hd95_val_mean.npy"
+                     if (average_root / model / "hd95_val_mean.npy").is_file()
+                     else average_root / model / "hausdorff95_val_mean.npy"),
         }
         for model in ("enet", "unet")
     }
     available = {
         model: paths for model, paths in metric_paths.items()
-        if all(path.is_file() for path in paths.values())
+        if paths["dice"].is_file() and paths["loss"].is_file()
     }
     if not available:
         print(f"No averaged metrics found under {average_root}; skipped metric plot")
         return
 
-    figure, axes = plt.subplots(1, 2, figsize=(12, 4))
+    has_iou = any(paths["iou"].is_file() for paths in available.values())
+    has_hd95 = any(paths["hd95"].is_file() for paths in available.values())
+    num_plots = 2 + int(has_iou) + int(has_hd95)
+
+    figure, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 4))
+    if num_plots == 1:
+        axes = [axes]
+
+    idx = 0
     for model, paths in available.items():
         dice = np.load(paths["dice"])
+        axes[idx].plot(np.mean(dice[:, :, 1:], axis=(1, 2)), label=model)
+    axes[idx].set_title("Average validation Dice")
+    axes[idx].set_xlabel("Epoch")
+    axes[idx].set_ylabel("Foreground Dice")
+    idx += 1
+
+    if has_iou:
+        for model, paths in available.items():
+            if paths["iou"].is_file():
+                iou = np.load(paths["iou"])
+                axes[idx].plot(np.mean(iou[:, :, 1:], axis=(1, 2)), label=model)
+        axes[idx].set_title("Average validation IoU")
+        axes[idx].set_xlabel("Epoch")
+        axes[idx].set_ylabel("Foreground IoU")
+        idx += 1
+
+    if has_hd95:
+        for model, paths in available.items():
+            if paths["hd95"].is_file():
+                hd95 = np.load(paths["hd95"])
+                axes[idx].plot(np.mean(hd95[:, :, 1:], axis=(1, 2)), label=model)
+        axes[idx].set_title("Average validation HD95")
+        axes[idx].set_xlabel("Epoch")
+        axes[idx].set_ylabel("HD95")
+        idx += 1
+
+    for model, paths in available.items():
         loss = np.load(paths["loss"])
-        axes[0].plot(np.mean(dice[:, :, 1:], axis=(1, 2)), label=model)
-        axes[1].plot(np.mean(loss, axis=1), label=model)
-    axes[0].set_title("Average validation Dice")
-    axes[0].set_xlabel("Epoch")
-    axes[0].set_ylabel("Foreground Dice")
-    axes[1].set_title("Average validation loss")
-    axes[1].set_xlabel("Epoch")
-    axes[1].set_ylabel("Loss")
+        axes[idx].plot(np.mean(loss, axis=1), label=model)
+    axes[idx].set_title("Average validation loss")
+    axes[idx].set_xlabel("Epoch")
+    axes[idx].set_ylabel("Loss")
+
     for axis in axes:
         axis.legend()
         axis.grid(alpha=0.25)
