@@ -52,6 +52,18 @@ def make_dataset(root, subset) -> list[tuple[Path, Path | None]]:
     return list(zip(images, full_labels))
 
 
+def make_volume_dataset(root, subset):
+    files = make_dataset(root, subset)
+    groups = defaultdict(list)
+    for image_path, gt_path in files:
+        groups[image_path.stem.rsplit("_", 1)[0]].append((image_path, gt_path))
+    return [
+        (group, [image for image, _ in entries],
+         None if subset == "test" else [gt for _, gt in entries if gt is not None])
+        for group, entries in sorted(groups.items())
+    ]
+
+
 class SliceDataset(Dataset):
     def __init__(self, subset, root_dir, img_transform=None,
                  gt_transform=None, augment=False, equalize=False, debug=False,
@@ -124,3 +136,33 @@ class SliceDataset(Dataset):
             data_dict["gts"] = gt
 
         return data_dict
+
+
+class VolumeDataset(Dataset):
+    """Load one complete patient volume per sample for 3D segmentation."""
+
+    def __init__(self, subset, root_dir, img_transform=None, gt_transform=None,
+                 debug=False):
+        self.test_mode = subset == "test"
+        self.img_transform = img_transform
+        self.gt_transform = gt_transform
+        self.volumes = make_volume_dataset(root_dir, subset)
+        if debug:
+            self.volumes = self.volumes[:2]
+        print(f">> Created {subset} volume dataset with {len(self)} patients...")
+
+    def __len__(self):
+        return len(self.volumes)
+
+    def __getitem__(self, index):
+        stem, image_paths, gt_paths = self.volumes[index]
+        images = torch.stack([
+            self.img_transform(Image.open(path))[0] for path in image_paths
+        ], dim=0).unsqueeze(0)
+        data = {"images": images, "stems": stem}
+        if not self.test_mode:
+            targets = torch.stack([
+                self.gt_transform(Image.open(path)) for path in gt_paths
+            ], dim=1)
+            data["gts"] = targets
+        return data

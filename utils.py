@@ -126,16 +126,18 @@ def probs2one_hot(probs: Tensor) -> Tensor:
 
 # Save the raw predictions
 def save_images(segs: Tensor, names: Iterable[str], root: Path) -> None:
-        for seg, name in zip(segs, names):
-                save_path = (root / name).with_suffix(".png")
-                save_path.parent.mkdir(parents=True, exist_ok=True)
+    for seg, name in zip(segs, names):
+        save_path = ((root / name).with_suffix(".npy")
+                 if len(seg.shape) == 3 else
+                 (root / name).with_suffix(".png"))
+        save_path.parent.mkdir(parents=True, exist_ok=True)
 
-                if len(seg.shape) == 2:
-                        Image.fromarray(seg.detach().cpu().numpy().astype(np.uint8)).save(save_path)
-                elif len(seg.shape) == 3:
-                        np.save(str(save_path), seg.detach().cpu().numpy())
-                else:
-                        raise ValueError(seg.shape)
+        if len(seg.shape) == 2:
+            Image.fromarray(seg.detach().cpu().numpy().astype(np.uint8)).save(save_path)
+        elif len(seg.shape) == 3:
+            np.save(str(save_path), seg.detach().cpu().numpy())
+        else:
+            raise ValueError(seg.shape)
 
 
 # Metrics
