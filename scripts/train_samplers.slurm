@@ -31,9 +31,10 @@ if [[ -z "${sampler}" ]]; then
     exit 1
 fi
 
-dataset="${DATASET:-SEGTHOR}"
+dataset="${DATASET:-SEGTHOR_FIXED}"
 model="${MODEL:-enet}"
 epochs="${EPOCHS:-20}"
+loss="${LOSS:-cross_entropy}"
 mode="${MODE:-full}"
 seed_base="${SEED_BASE:-1000}"
 seed=$((seed_base + run_number - 1))
@@ -45,6 +46,7 @@ exec "${PYTHON}" -O main.py \
     --model "${model}" \
     --mode "${mode}" \
     --epochs "${epochs}" \
+    --loss "${loss}" \
     --seed "${seed}" \
     --sampling "${sampler}" \
     --dest "${dest}" \

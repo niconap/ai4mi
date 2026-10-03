@@ -123,7 +123,7 @@ You can also create new conda environment in anaconda prompt
 
 <a id="getting-the-data"></a>
 ### Getting the data
-The synthetic dataset is generated randomly, whereas for Segthor it is required to put the file [`segthor_part1.zip`](https://amsuni-my.sharepoint.com/:u:/g/personal/h_t_g_kervadec_uva_nl/IQBJLXRY5wedSYEuofqRtuylAWiiHp2ciems5XSCu3DFMkA?e=qa3Ujf) (required a UvA account) in the `data/` folder. If the computer running it is powerful enough, the recipe for `data/SEGTHOR` can be modified in the [Makefile](Makefile) to enable multi-processing (`-p -1` option, see `python slice_segthor.py --help` or its code directly).
+The synthetic dataset is generated randomly, whereas for Segthor it is required to put the file [`segthor_train_full.zip`](https://amsuni-my.sharepoint.com/:u:/g/personal/h_t_g_kervadec_uva_nl/IQAdjIjKmc4XRbIBQl9qeBs8AXOF-9Evw0v_lEbvLn2mUdE?e=lZev9Z) (required a UvA account) in the `data/` folder. If the computer running it is powerful enough, the recipe for `data/SEGTHOR` can be modified in the [Makefile](Makefile) to enable multi-processing (`-p -1` option, see `python slice_segthor.py --help` or its code directly).
 ```
 $ make data/TOY2
 $ make data/SEGTHOR
@@ -150,25 +150,77 @@ $ mv data/SEGTHOR_tmp data/SEGTHOR
 Running a training
 ```
 $ python main.py --help
-usage: main.py [-h] [--epochs EPOCHS] [--dataset {TOY2,SEGTHOR,SEGTHOR_CLEAN}] [--model {enet,unet,resunetpp}] [--mode {partial,full}] --dest DEST [--gpu] [--debug]
+usage: main.py [-h] [--epochs EPOCHS] [--dataset {TOY2,SEGTHOR}] [--mode {partial,full}] --dest DEST [--gpu] [--debug]
 
 options:
   -h, --help            show this help message and exit
   --epochs EPOCHS
-    --dataset {TOY2,SEGTHOR,SEGTHOR_CLEAN}
-    --model {enet,unet,resunetpp}
-                                                Model to use for the selected dataset (default: dataset-specific).
+  --dataset {TOY2,SEGTHOR}
   --mode {partial,full}
   --dest DEST           Destination directory to save the results (predictions and weights).
   --gpu
   --debug               Keep only a fraction (10 samples) of the datasets, to test the logic around epochs and logging easily.
-$ python main.py --dataset TOY2 --mode full --epochs 25 --dest results/toy2/ce --gpu
+$ python main.py --dataset TOY2 --mode full --epoch 25 --dest results/toy2/ce --gpu
 ```
 
-To train with ResUNet++:
+To train the 2.5D model, select `unet25d`. It predicts the center slice from
+an odd-sized axial context window; the default uses the previous, current, and
+next slices. The context is restricted to the same patient and edge slices are
+replicated:
 ```
-$ python main.py --dataset SEGTHOR --model resunetpp --mode full --epochs 25 --dest results/segthor/resunetpp --gpu
+$ python main.py --dataset SEGTHOR_FIXED --model unet25d \
+    --context-slices 3 --mode full --loss dice_cross_entropy --epochs 25 \
+    --dest results/segthor/25d --gpu
 ```
+
+The volume-based 3D U-Net is selected with `unet3d`. It loads one complete
+patient volume per sample, so training uses batch size 1 and requires enough
+GPU memory for the full resized volume:
+```
+$ python main.py --dataset SEGTHOR_FIXED --model unet3d \
+    --loss dice_cross_entropy --epochs 25 \
+    --dest results/segthor/3d --gpu
+```
+The existing PNG slices are stacked by patient; no original NIfTI files are
+required. Predictions are saved as NumPy volume files in each validation
+iteration.
+
+For a five-seed Slurm experiment with convergence plots:
+```
+$ train_job=$(sbatch --parsable scripts/train_25d.slurm)
+$ sbatch --dependency=afterok:${train_job} \
+    --export=ALL,RUN_BATCH_ID=${train_job} scripts/plot_25d.slurm
+```
+The jobs use 50 epochs by default and write the averaged metrics to
+`/scratch-shared/scur0109/ai4mi_nico/results/25d/job_<array-id>/averages/`
+and the plot to `results/25d/unet25d_convergence.png`. Set
+`DATASET`, `CONTEXT_SLICES`, `EPOCHS`, or `DEST_ROOT` before submission to
+override those defaults. The 2.5D Slurm experiment uses
+`dice_cross_entropy` by default; set `LOSS=cross_entropy` or `LOSS=dice` to
+compare alternatives.
+
+Training metrics and Slurm logs are stored by default under the shared
+`/scratch-shared/scur0109/` filesystem so array jobs on different
+nodes can be combined. The plots remain in the repository under `results/`.
+
+To compare all three losses on the 2.5D model:
+```
+$ loss_job=$(sbatch --parsable scripts/train_25d_loss_comparison.slurm)
+$ sbatch --dependency=afterok:${loss_job} \
+    --export=ALL,RUN_BATCH_ID=${loss_job} scripts/plot_25d_loss_comparison.slurm
+```
+This produces `results/25d/loss_comparison_loss.png` and
+`results/25d/loss_comparison_dice.png`, and stores the run metrics on
+shared scratch under `results/25d_loss_comparison/job_<array-id>/`.
+
+The equivalent 3D U-Net loss comparison uses:
+```
+$ loss_3d_job=$(sbatch --parsable scripts/train_3d_loss_comparison.slurm)
+$ sbatch --dependency=afterok:${loss_3d_job} \
+    --export=ALL,RUN_BATCH_ID=${loss_3d_job} scripts/plot_3d_loss_comparison.slurm
+```
+It writes `results/3d/loss_comparison_loss.png` and
+`results/3d/loss_comparison_dice.png`.
 
 The codebase uses a lot of assertions for control and self-documentation, they can easily be disabled with the `-O` option (for faster training) once everything is known to be correct (for instance run the previous command for 1/2 epochs, then kill it and relaunch it):
 ```

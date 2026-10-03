@@ -23,6 +23,7 @@
 # SOFTWARE.
 
 import argparse
+import json
 import random
 import warnings
 from typing import Any
@@ -40,13 +41,18 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from functools import partial 
 
-from dataset import SliceDataset
+from dataset import SliceDataset, VolumeDataset
 from sampling import (make_foreground_sampler,
                       make_label_sampler,
                       make_patient_sampler)
+from voxel_sampling import VoxelPatchDataset, sliding_window_probs
+from segthor_labels import decode_png, inspect_dataset
+from augmentation import EXPERIMENTS
 from ShallowNet import shallowCNN
 from ENet import ENet
 from UNet import UNet
+from UNet3D import UNet3D
+from TwoPointFiveD import TwoPointFiveD
 from ResUNetPP import ResUNetPP
 from utils import (Dcm,
                    class2one_hot,
@@ -54,16 +60,20 @@ from utils import (Dcm,
                    probs2class,
                    tqdm_,
                    dice_coef,
+                   iou_coef,
+                   hd95_coef,
+                   hausdorff95,
                    save_images)
 
-from losses import (CrossEntropy)
+from losses import make_loss
 
 datasets_params: dict[str, dict[str, Any]] = {}
 # K for the number of classes
 # Avoids the classes with C (often used for the number of Channel)
 datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
-datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+datasets_params["SEGTHOR_FIXED"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+datasets_params["SEGTHOR_FULL"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 
 def img_transform(img):
         img = img.convert('L')
@@ -78,12 +88,21 @@ def gt_transform(K, img):
         # {0, 85, 170, 255} for 4 classes
         # {0, 51, 102, 153, 204, 255} for 6 classes
         # Very sketchy but that works here and that simplifies visualization
-        img = img / (255 / (K - 1)) if K != 5 else img / 63  # max <= 1
+        img = img / (255 / (K - 1)) if K != 5 else decode_png(img)
         img = torch.tensor(img, dtype=torch.int64)[None, ...]  # Add one dimension to simulate batch
         img = class2one_hot(img, K=K)
         return img[0]
 
 def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
+    root_dir = Path("data") / args.dataset
+    label_report = None
+    if args.dataset.startswith("SEGTHOR"):
+        label_report = inspect_dataset(
+            root_dir, require_separate=args.dataset == "SEGTHOR_FIXED")
+        if label_report["schema"] == "merged":
+            warnings.warn("Class 4 has no targets.")
+    if args.dest.exists() and any(args.dest.iterdir()):
+        raise ValueError(f"Result directory is not empty: {args.dest}; use a new destination.")
     # Networks and scheduler
     gpu: bool = args.gpu and torch.cuda.is_available()
     device = torch.device("cuda") if gpu else torch.device("cpu")
@@ -92,10 +111,11 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    models = {'enet': ENet, 'unet': UNet, 'resunetpp': ResUNetPP}
+    models = {'enet': ENet, 'unet': UNet, 'unet25d': TwoPointFiveD, 'unet3d': UNet3D, 'resunetpp': ResUNetPP}
     model = models[args.model] if args.model is not None else datasets_params[args.dataset]['net']
+    context_slices = args.context_slices if args.model == 'unet25d' else 1
 
-    net = model(1, K, kernels=kernels, factor=factor)
+    net = model(1, K, kernels=kernels, factor=factor, context_slices=context_slices)
     net.init_weights()
     net.to(device)
 
@@ -103,16 +123,35 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
 
     # Dataset part
-    B: int = datasets_params[args.dataset]['B']
-    root_dir = Path("data") / args.dataset
+    B: int = 1 if args.model == 'unet3d' else datasets_params[args.dataset]['B']
+    dataset_class = VolumeDataset if args.model == 'unet3d' else SliceDataset
+    train_kwargs = {} if args.model == 'unet3d' else {
+        'experiment': args.experiment,
+        'context_slices': context_slices,
+    }
+    val_kwargs = {} if args.model == 'unet3d' else {
+        'experiment': 'B5' if args.experiment == 'B5' else 'B0',
+        'context_slices': context_slices,
+    }
 
-
-
-    train_set = SliceDataset('train',
-                             root_dir,
-                             img_transform=img_transform,
-                             gt_transform= partial(gt_transform, K),
-                             debug=args.debug)
+    if args.patch_sampling:
+        if args.model != 'unet3d':
+            raise ValueError("--patch-sampling needs --model unet3d")
+        train_set = VoxelPatchDataset(root_dir,
+                                      img_transform=img_transform,
+                                      gt_transform=partial(gt_transform, K),
+                                      strategy=args.patch_sampling,
+                                      patch_size=args.patch_size,
+                                      patches_per_volume=args.patches_per_volume,
+                                      foreground_fraction=args.foreground_fraction,
+                                      debug=args.debug)
+    else:
+        train_set = dataset_class('train',
+                                 root_dir,
+                                 img_transform=img_transform,
+                                 gt_transform= partial(gt_transform, K),
+                                 debug=args.debug,
+                                 **train_kwargs)
 
     sampler = None
     if args.sampling == 'uniform_replacement':
@@ -176,19 +215,26 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                               batch_size=B,
                               num_workers=5,
                               sampler=sampler,
-                              shuffle=sampler is None)
+                              shuffle=sampler is None,
+                              drop_last=True) #only for resunet
 
-    val_set = SliceDataset('val',
+    val_set = dataset_class('val',
                            root_dir,
                            img_transform=img_transform,
                            gt_transform=partial(gt_transform, K),
-                           debug=args.debug)
+                           debug=args.debug,
+                           **val_kwargs)
     val_loader = DataLoader(val_set,
                             batch_size=B,
                             num_workers=5,
                             shuffle=False)
 
     args.dest.mkdir(parents=True, exist_ok=True)
+    if label_report is not None:
+        (args.dest / "label_schema.json").write_text(
+            json.dumps(label_report, indent=2) + "\n")
+    (args.dest / "config.json").write_text(
+        json.dumps(vars(args), default=str, indent=2) + "\n")
 
     return (net, optimizer, device, train_loader, val_loader, K)
 
@@ -198,17 +244,23 @@ def runTraining(args):
     net, optimizer, device, train_loader, val_loader, K = setup(args)
 
     if args.mode == "full":
-        loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
+        idk = list(range(K))  # Supervise both background and foreground
     elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
-        loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
+        idk = [0, 1, 3, 4]  # Do not supervise the heart (class 2)
     else:
         raise ValueError(args.mode, args.dataset)
+    loss_fn = make_loss(args.loss, idk=idk)
 
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
     log_dice_tra: Tensor = torch.zeros((args.epochs, len(train_loader.dataset), K))
+    log_iou_tra: Tensor = torch.zeros((args.epochs, len(train_loader.dataset), K))
+    log_hd95_tra: Tensor = torch.zeros((args.epochs, len(train_loader.dataset), K))
+
     log_loss_val: Tensor = torch.zeros((args.epochs, len(val_loader)))
     log_dice_val: Tensor = torch.zeros((args.epochs, len(val_loader.dataset), K))
+    log_iou_val: Tensor = torch.zeros((args.epochs, len(val_loader.dataset), K))
+    log_hd95_val: Tensor = torch.zeros((args.epochs, len(val_loader.dataset), K))
 
     best_dice: float = 0
 
@@ -223,6 +275,8 @@ def runTraining(args):
                     loader = train_loader
                     log_loss = log_loss_tra
                     log_dice = log_dice_tra
+                    log_iou = log_iou_tra
+                    log_hd95 = log_hd95_tra
                 case 'val':
                     net.eval()
                     opt = None
@@ -231,27 +285,36 @@ def runTraining(args):
                     loader = val_loader
                     log_loss = log_loss_val
                     log_dice = log_dice_val
+                    log_iou = log_iou_val
+                    log_hd95 = log_hd95_val
 
             with cm():  # Either dummy context manager, or the torch.no_grad for validation
                 j = 0
                 tq_iter = tqdm_(enumerate(loader), total=len(loader), desc=desc)
                 for i, data in tq_iter:
-                    img = data['images'].to(device)
-                    gt = data['gts'].to(device)
+                    # Patch-trained models predict whole validation volumes on the CPU, patch by patch
+                    sliding = args.patch_sampling is not None and m == 'val'
+                    img = data['images'].to('cpu' if sliding else device)
+                    gt = data['gts'].to('cpu' if sliding else device)
 
                     if opt:  # So only for training
                         opt.zero_grad()
 
                     # Sanity tests to see we loaded and encoded the data correctly
                     assert 0 <= img.min() and img.max() <= 1
-                    B, _, W, H = img.shape
+                    B = img.shape[0]
 
-                    pred_logits = net(img)
-                    pred_probs = F.softmax(1 * pred_logits, dim=1)  # 1 is the temperature parameter
+                    if sliding:
+                        pred_probs = sliding_window_probs(net, img, args.patch_size, device)
+                    else:
+                        pred_logits = net(img)
+                        pred_probs = F.softmax(1 * pred_logits, dim=1)  # 1 is the temperature parameter
 
                     # Metrics computation, not used for training
                     pred_seg = probs2one_hot(pred_probs)
                     log_dice[e, j:j + B, :] = dice_coef(pred_seg, gt)  # One DSC value per sample and per class
+                    log_iou[e, j:j + B, :] = iou_coef(pred_seg, gt)
+                    log_hd95[e, j:j + B, :] = hd95_coef(pred_seg, gt)
 
                     loss = loss_fn(pred_probs, gt)
                     log_loss[e, i] = loss.item()  # One loss value per batch (averaged in the loss)
@@ -270,8 +333,10 @@ def runTraining(args):
                                         args.dest / f"iter{e:03d}" / m)
 
                     j += B  # Keep in mind that _in theory_, each batch might have a different size
-                    # For the DSC average: do not take the background class (0) into account:
+                    # For the metric averages: do not take the background class (0) into account:
                     postfix_dict: dict[str, str] = {"Dice": f"{log_dice[e, :j, 1:].mean():05.3f}",
+                                                    "IoU": f"{log_iou[e, :j, 1:].mean():05.3f}",
+                                                    "HD95": f"{log_hd95[e, :j, 1:].mean():05.2f}",
                                                     "Loss": f"{log_loss[e, :i + 1].mean():5.2e}"}
                     if K > 2:
                         postfix_dict |= {f"Dice-{k}": f"{log_dice[e, :j, k].mean():05.3f}"
@@ -281,12 +346,22 @@ def runTraining(args):
         # I save it at each epochs, in case the code crashes or I decide to stop it early
         np.save(args.dest / "loss_tra.npy", log_loss_tra)
         np.save(args.dest / "dice_tra.npy", log_dice_tra)
+        np.save(args.dest / "iou_tra.npy", log_iou_tra)
+        np.save(args.dest / "hd95_tra.npy", log_hd95_tra)
+        np.save(args.dest / "hausdorff95_tra.npy", log_hd95_tra)
+
         np.save(args.dest / "loss_val.npy", log_loss_val)
         np.save(args.dest / "dice_val.npy", log_dice_val)
+        np.save(args.dest / "iou_val.npy", log_iou_val)
+        np.save(args.dest / "hd95_val.npy", log_hd95_val)
+        np.save(args.dest / "hausdorff95_val.npy", log_hd95_val)
 
         current_dice: float = log_dice_val[e, :, 1:].mean().item()
+        current_iou: float = log_iou_val[e, :, 1:].mean().item()
+        current_hd95: float = log_hd95_val[e, :, 1:].mean().item()
         if current_dice > best_dice:
-            message = f">>> Improved dice at epoch {e}: {best_dice:05.3f}->{current_dice:05.3f} DSC"
+            message = (f">>> Improved dice at epoch {e}: {best_dice:05.3f}->{current_dice:05.3f} DSC "
+                       f"(IoU: {current_iou:05.3f}, HD95: {current_hd95:05.2f})")
             print(message)
             best_dice = current_dice
             with open(args.dest / "best_epoch.txt", 'w') as f:
@@ -306,8 +381,10 @@ def main():
 
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
-    parser.add_argument('--model', choices=['enet', 'unet', 'resunetpp'], default=None,
+    parser.add_argument('--model', choices=['enet', 'unet', 'unet25d', 'unet3d', 'resunetpp'], default=None,
                         help="Model to use for the selected dataset (default: dataset-specific).")
+    parser.add_argument('--context-slices', type=int, default=3,
+                        help="Odd number of axial slices for the unet25d model.")
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
@@ -317,8 +394,19 @@ def main():
                         default='uniform')
     parser.add_argument('--sampling-mixture', type=float, default=0.5)
     parser.add_argument('--foreground-fraction', type=float, default=0.75)
+    parser.add_argument('--patch-sampling', choices=['uniform', 'foreground', 'label'], default=None,
+                        help="Train unet3d on 3D patches centred on voxels picked this way.")
+    parser.add_argument('--patch-size', type=int, nargs=3, default=[32, 128, 128], metavar=('D', 'H', 'W'))
+    parser.add_argument('--patches-per-volume', type=int, default=16)
+
+    parser.add_argument('--loss', choices=['cross_entropy', 'dice', 'dice_cross_entropy', 'focal_tversky', 'ftl'],
+                        default='focal_tversky',
+                        help="Training loss; dice_cross_entropy combines overlap and CE, focal_tversky addresses hard/imbalanced classes.")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
+
+    parser.add_argument('--experiment', choices=EXPERIMENTS, default='B0',
+                        help='Independent B0–B6 experiments')
 
     parser.add_argument('--gpu', action='store_true')
     parser.add_argument('--debug', action='store_true',
