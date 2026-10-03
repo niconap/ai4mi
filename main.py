@@ -281,9 +281,11 @@ def main():
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
-    parser.add_argument('--loss', choices=['cross_entropy', 'dice', 'dice_cross_entropy'],
+    parser.add_argument('--loss', choices=['cross_entropy', 'dice', 'dice_cross_entropy',
+                                           'focal_tversky', 'ftl'],
                         default='cross_entropy',
-                        help="Training loss; dice_cross_entropy combines overlap and CE.")
+                        help="Training loss; dice_cross_entropy combines overlap and CE, "
+                             "and focal_tversky addresses hard or imbalanced classes.")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
 
