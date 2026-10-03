@@ -178,3 +178,155 @@ def union(a: Tensor, b: Tensor) -> Tensor:
     assert sset(res, [0, 1])
 
     return res
+
+
+def meta_iou(sum_str: str, label: Tensor, pred: Tensor, smooth: float = 1e-8) -> Tensor:
+    assert label.shape == pred.shape
+    assert one_hot(label)
+    assert one_hot(pred)
+
+    inter_size: Tensor = einsum(sum_str, [intersection(label, pred)]).type(torch.float32)
+    union_size: Tensor = einsum(sum_str, [union(label, pred)]).type(torch.float32)
+
+    ious: Tensor = (inter_size + smooth) / (union_size + smooth)
+
+    return ious
+
+
+iou_coef = partial(meta_iou, "bk...->bk")
+iou_batch = partial(meta_iou, "bk...->k")  # used for 3d iou
+
+
+def hausdorff95_single(pred: np.ndarray, label: np.ndarray,
+                       voxelspacing: tuple[float, ...] | None = None,
+                       max_dist: float | None = None,
+                       percentile: float = 95.0) -> float:
+    """Compute the 95th percentile Hausdorff Distance between two binary masks.
+
+    Args:
+        pred: Binary mask of predicted segmentation (2D or 3D bool/int array).
+        label: Binary mask of ground truth segmentation (2D or 3D bool/int array).
+        voxelspacing: Voxel spacing along each spatial dimension.
+        max_dist: Maximum penalty distance if exactly one mask is empty. Defaults to the
+                  spatial domain diagonal.
+        percentile: Distance percentile to compute (default: 95.0).
+
+    Returns:
+        The percentile Hausdorff distance (0.0 if both masks are empty, max_dist if
+        exactly one mask is empty).
+    """
+    pred_bool = np.asarray(pred, dtype=bool)
+    label_bool = np.asarray(label, dtype=bool)
+
+    pred_empty = not np.any(pred_bool)
+    label_empty = not np.any(label_bool)
+
+    if pred_empty and label_empty:
+        return 0.0
+
+    spatial_shape = pred_bool.shape
+    if max_dist is None:
+        if voxelspacing is not None:
+            max_dist = float(np.sqrt(sum((s * sp) ** 2 for s, sp in zip(spatial_shape, voxelspacing))))
+        else:
+            max_dist = float(np.sqrt(sum(s ** 2 for s in spatial_shape)))
+
+    if pred_empty or label_empty:
+        return float(max_dist)
+
+    try:
+        from scipy.ndimage import binary_erosion, distance_transform_edt
+        footprint = np.ones((3,) * pred_bool.ndim, dtype=bool)
+        pred_border = pred_bool ^ binary_erosion(pred_bool, structure=footprint)
+        label_border = label_bool ^ binary_erosion(label_bool, structure=footprint)
+
+        if not np.any(pred_border):
+            pred_border = pred_bool
+        if not np.any(label_border):
+            label_border = label_bool
+
+        dt_label = distance_transform_edt(~label_border, sampling=voxelspacing)
+        dt_pred = distance_transform_edt(~pred_border, sampling=voxelspacing)
+
+        d_pred_to_label = dt_label[pred_border]
+        d_label_to_pred = dt_pred[label_border]
+    except ImportError:
+        def get_border(m):
+            padded = np.pad(m, 1, mode='constant', constant_values=0)
+            slices = [slice(1, -1)] * m.ndim
+            eroded = np.ones_like(m, dtype=bool)
+            for d in range(m.ndim):
+                for s in (-1, 1):
+                    neighbor_slice = list(slices)
+                    neighbor_slice[d] = slice(1 + s, -1 + s if -1 + s != 0 else None)
+                    eroded &= padded[tuple(neighbor_slice)]
+            border = m ^ eroded
+            return border if np.any(border) else m
+
+        pred_border = get_border(pred_bool)
+        label_border = get_border(label_bool)
+
+        pts_pred = np.argwhere(pred_border).astype(float)
+        pts_label = np.argwhere(label_border).astype(float)
+        if voxelspacing is not None:
+            spacing = np.array(voxelspacing, dtype=float)
+            pts_pred *= spacing
+            pts_label *= spacing
+
+        d_pred_to_label = [float(np.min(np.linalg.norm(pts_label - p, axis=1))) for p in pts_pred]
+        d_label_to_pred = [float(np.min(np.linalg.norm(pts_pred - l, axis=1))) for l in pts_label]
+
+    all_dists = np.concatenate([d_pred_to_label, d_label_to_pred])
+    return float(np.percentile(all_dists, percentile))
+
+
+def hausdorff95(pred: Tensor | np.ndarray, label: Tensor | np.ndarray,
+                voxelspacing: tuple[float, ...] | None = None,
+                max_dist: float | None = None,
+                percentile: float = 95.0) -> Tensor:
+    """Compute HD95 for a batch of predictions and targets.
+
+    Expects one-hot or binary tensors of shape (B, K, ...) or (K, ...).
+    Returns a Tensor of shape (B, K) or (K,).
+    """
+    is_torch = isinstance(pred, Tensor)
+    device = pred.device if is_torch else None
+
+    if is_torch:
+        pred_np = pred.detach().cpu().numpy().astype(bool)
+        label_np = label.detach().cpu().numpy().astype(bool)
+    else:
+        pred_np = np.asarray(pred, dtype=bool)
+        label_np = np.asarray(label, dtype=bool)
+
+    assert pred_np.shape == label_np.shape, f"Shape mismatch: {pred_np.shape} vs {label_np.shape}"
+
+    if pred_np.ndim >= 3:
+        B, K = pred_np.shape[0], pred_np.shape[1]
+        res = np.zeros((B, K), dtype=np.float32)
+        for b in range(B):
+            for k in range(K):
+                res[b, k] = hausdorff95_single(pred_np[b, k], label_np[b, k],
+                                               voxelspacing=voxelspacing,
+                                               max_dist=max_dist,
+                                               percentile=percentile)
+    elif pred_np.ndim == 2:
+        K = pred_np.shape[0]
+        res = np.zeros(K, dtype=np.float32)
+        for k in range(K):
+            res[k] = hausdorff95_single(pred_np[k], label_np[k],
+                                        voxelspacing=voxelspacing,
+                                        max_dist=max_dist,
+                                        percentile=percentile)
+    else:
+        res = np.float32(hausdorff95_single(pred_np, label_np,
+                                            voxelspacing=voxelspacing,
+                                            max_dist=max_dist,
+                                            percentile=percentile))
+
+    return torch.from_numpy(res).to(device) if is_torch else torch.from_numpy(np.atleast_1d(res))
+
+
+hd95_coef = hausdorff95
+hausdorff95_coef = hausdorff95
+

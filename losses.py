@@ -64,9 +64,8 @@ class SoftDiceLoss:
 
         prediction = pred_softmax[:, self.idk].float()
         target = weak_target[:, self.idk].float()
-        spatial_dims = tuple(range(2, prediction.ndim))
-        intersection = (prediction * target).sum(dim=(0, *spatial_dims))
-        denominator = (prediction + target).sum(dim=(0, *spatial_dims))
+        intersection = (prediction * target).sum(dim=(0, 2, 3))
+        denominator = (prediction + target).sum(dim=(0, 2, 3))
         dice = (2 * intersection + self.smooth) / (denominator + self.smooth)
         return 1 - dice.mean()
 
@@ -86,11 +85,58 @@ class DiceCrossEntropy:
                 + dice_weight * self.dice(pred_softmax, weak_target))
 
 
+class FocalTverskyLoss:
+    """Focal Tversky Loss for imbalanced 2D and 3D medical image segmentation.
+
+    Combines the Tversky Index (balancing false positives vs false negatives via
+    alpha and beta) with a focal parameter (gamma) to focus optimization on hard
+    slices or regions that are difficult to segment.
+    """
+
+    def __init__(self, *, idk, alpha: float = 0.3, beta: float = 0.7,
+                 gamma: float = 4 / 3, smooth: float = 1e-5,
+                 per_image: bool = True, **kwargs):
+        self.idk = idk
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+        self.per_image = per_image
+        print(
+            f"Initialized {self.__class__.__name__} with {idk=}, {alpha=}, "
+            f"{beta=}, {gamma=}, {smooth=}, {per_image=}"
+        )
+
+    def __call__(self, pred_softmax, weak_target):
+        assert pred_softmax.shape == weak_target.shape
+        assert simplex(pred_softmax)
+        assert sset(weak_target, [0, 1])
+
+        prediction = pred_softmax[:, self.idk].float()
+        target = weak_target[:, self.idk].float()
+
+        dims = tuple(range(2, prediction.ndim)) if self.per_image else (0, *range(2, prediction.ndim))
+
+        tp = (prediction * target).sum(dim=dims)
+        fp = (prediction * (1.0 - target)).sum(dim=dims)
+        fn = ((1.0 - prediction) * target).sum(dim=dims)
+
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        focal_tversky = torch.clamp(1.0 - tversky, min=1e-8) ** self.gamma
+
+        return focal_tversky.mean()
+
+
+FocalTversky = FocalTverskyLoss
+
+
 def make_loss(name, *, idk):
     losses = {
         "cross_entropy": CrossEntropy,
         "dice": SoftDiceLoss,
         "dice_cross_entropy": DiceCrossEntropy,
+        "focal_tversky": FocalTverskyLoss,
+        "ftl": FocalTverskyLoss,
     }
     try:
         loss_class = losses[name]

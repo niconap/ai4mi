@@ -56,6 +56,9 @@ from utils import (Dcm,
                    probs2class,
                    tqdm_,
                    dice_coef,
+                   iou_coef,
+                   hd95_coef,
+                   hausdorff95,
                    save_images)
 
 from losses import make_loss
@@ -175,8 +178,13 @@ def runTraining(args):
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
     log_dice_tra: Tensor = torch.zeros((args.epochs, len(train_loader.dataset), K))
+    log_iou_tra: Tensor = torch.zeros((args.epochs, len(train_loader.dataset), K))
+    log_hd95_tra: Tensor = torch.zeros((args.epochs, len(train_loader.dataset), K))
+
     log_loss_val: Tensor = torch.zeros((args.epochs, len(val_loader)))
     log_dice_val: Tensor = torch.zeros((args.epochs, len(val_loader.dataset), K))
+    log_iou_val: Tensor = torch.zeros((args.epochs, len(val_loader.dataset), K))
+    log_hd95_val: Tensor = torch.zeros((args.epochs, len(val_loader.dataset), K))
 
     best_dice: float = 0
 
@@ -191,6 +199,8 @@ def runTraining(args):
                     loader = train_loader
                     log_loss = log_loss_tra
                     log_dice = log_dice_tra
+                    log_iou = log_iou_tra
+                    log_hd95 = log_hd95_tra
                 case 'val':
                     net.eval()
                     opt = None
@@ -199,6 +209,8 @@ def runTraining(args):
                     loader = val_loader
                     log_loss = log_loss_val
                     log_dice = log_dice_val
+                    log_iou = log_iou_val
+                    log_hd95 = log_hd95_val
 
             with cm():  # Either dummy context manager, or the torch.no_grad for validation
                 j = 0
@@ -220,6 +232,8 @@ def runTraining(args):
                     # Metrics computation, not used for training
                     pred_seg = probs2one_hot(pred_probs)
                     log_dice[e, j:j + B, :] = dice_coef(pred_seg, gt)  # One DSC value per sample and per class
+                    log_iou[e, j:j + B, :] = iou_coef(pred_seg, gt)
+                    log_hd95[e, j:j + B, :] = hd95_coef(pred_seg, gt)
 
                     loss = loss_fn(pred_probs, gt)
                     log_loss[e, i] = loss.item()  # One loss value per batch (averaged in the loss)
@@ -238,8 +252,10 @@ def runTraining(args):
                                         args.dest / f"iter{e:03d}" / m)
 
                     j += B  # Keep in mind that _in theory_, each batch might have a different size
-                    # For the DSC average: do not take the background class (0) into account:
+                    # For the metric averages: do not take the background class (0) into account:
                     postfix_dict: dict[str, str] = {"Dice": f"{log_dice[e, :j, 1:].mean():05.3f}",
+                                                    "IoU": f"{log_iou[e, :j, 1:].mean():05.3f}",
+                                                    "HD95": f"{log_hd95[e, :j, 1:].mean():05.2f}",
                                                     "Loss": f"{log_loss[e, :i + 1].mean():5.2e}"}
                     if K > 2:
                         postfix_dict |= {f"Dice-{k}": f"{log_dice[e, :j, k].mean():05.3f}"
@@ -249,12 +265,22 @@ def runTraining(args):
         # I save it at each epochs, in case the code crashes or I decide to stop it early
         np.save(args.dest / "loss_tra.npy", log_loss_tra)
         np.save(args.dest / "dice_tra.npy", log_dice_tra)
+        np.save(args.dest / "iou_tra.npy", log_iou_tra)
+        np.save(args.dest / "hd95_tra.npy", log_hd95_tra)
+        np.save(args.dest / "hausdorff95_tra.npy", log_hd95_tra)
+
         np.save(args.dest / "loss_val.npy", log_loss_val)
         np.save(args.dest / "dice_val.npy", log_dice_val)
+        np.save(args.dest / "iou_val.npy", log_iou_val)
+        np.save(args.dest / "hd95_val.npy", log_hd95_val)
+        np.save(args.dest / "hausdorff95_val.npy", log_hd95_val)
 
         current_dice: float = log_dice_val[e, :, 1:].mean().item()
+        current_iou: float = log_iou_val[e, :, 1:].mean().item()
+        current_hd95: float = log_hd95_val[e, :, 1:].mean().item()
         if current_dice > best_dice:
-            message = f">>> Improved dice at epoch {e}: {best_dice:05.3f}->{current_dice:05.3f} DSC"
+            message = (f">>> Improved dice at epoch {e}: {best_dice:05.3f}->{current_dice:05.3f} DSC "
+                       f"(IoU: {current_iou:05.3f}, HD95: {current_hd95:05.2f})")
             print(message)
             best_dice = current_dice
             with open(args.dest / "best_epoch.txt", 'w') as f:
@@ -281,11 +307,10 @@ def main():
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
-    parser.add_argument('--loss', choices=['cross_entropy', 'dice', 'dice_cross_entropy',
-                                           'focal_tversky', 'ftl'],
-                        default='cross_entropy',
-                        help="Training loss; dice_cross_entropy combines overlap and CE, "
-                             "and focal_tversky addresses hard or imbalanced classes.")
+
+    parser.add_argument('--loss', choices=['cross_entropy', 'dice', 'dice_cross_entropy', 'focal_tversky', 'ftl'],
+                        default='focal_tversky',
+                        help="Training loss; dice_cross_entropy combines overlap and CE, focal_tversky addresses hard/imbalanced classes.")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
 
