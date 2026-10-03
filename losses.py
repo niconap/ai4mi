@@ -23,6 +23,7 @@
 # SOFTWARE.
 
 
+import torch
 from torch import einsum
 
 from utils import simplex, sset
@@ -42,7 +43,7 @@ class CrossEntropy():
         log_p = (pred_softmax[:, self.idk, ...] + 1e-10).log()
         mask = weak_target[:, self.idk, ...].float()
 
-        loss = - einsum("bkwh,bkwh->", mask, log_p)
+        loss = - einsum("bk...,bk...->", mask, log_p)
         loss /= mask.sum() + 1e-10
 
         return loss

@@ -41,12 +41,14 @@ from torch.utils.data import DataLoader
 
 from functools import partial 
 
-from dataset import SliceDataset
+from dataset import SliceDataset, VolumeDataset
 from segthor_labels import decode_png, inspect_dataset
 from augmentation import EXPERIMENTS
 from ShallowNet import shallowCNN
 from ENet import ENet
 from UNet import UNet
+from UNet3D import UNet3D
+from TwoPointFiveD import TwoPointFiveD
 from ResUNetPP import ResUNetPP
 from utils import (Dcm,
                    class2one_hot,
@@ -59,7 +61,7 @@ from utils import (Dcm,
                    hausdorff95,
                    save_images)
 
-from losses import (CrossEntropy)
+from losses import make_loss
 
 datasets_params: dict[str, dict[str, Any]] = {}
 # K for the number of classes
@@ -67,6 +69,7 @@ datasets_params: dict[str, dict[str, Any]] = {}
 datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR_FIXED"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+datasets_params["SEGTHOR_FULL"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 
 def img_transform(img):
         img = img.convert('L')
@@ -104,10 +107,11 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    models = {'enet': ENet, 'unet': UNet, 'resunetpp': ResUNetPP}
+    models = {'enet': ENet, 'unet': UNet, 'unet25d': TwoPointFiveD, 'unet3d': UNet3D, 'resunetpp': ResUNetPP}
     model = models[args.model] if args.model is not None else datasets_params[args.dataset]['net']
+    context_slices = args.context_slices if args.model == 'unet25d' else 1
 
-    net = model(1, K, kernels=kernels, factor=factor)
+    net = model(1, K, kernels=kernels, factor=factor, context_slices=context_slices)
     net.init_weights()
     net.to(device)
 
@@ -115,28 +119,35 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
 
     # Dataset part
-    B: int = datasets_params[args.dataset]['B']
+    B: int = 1 if args.model == 'unet3d' else datasets_params[args.dataset]['B']
+    dataset_class = VolumeDataset if args.model == 'unet3d' else SliceDataset
+    train_kwargs = {} if args.model == 'unet3d' else {
+        'experiment': args.experiment,
+        'context_slices': context_slices,
+    }
+    val_kwargs = {} if args.model == 'unet3d' else {
+        'experiment': 'B5' if args.experiment == 'B5' else 'B0',
+        'context_slices': context_slices,
+    }
 
-
-
-    train_set = SliceDataset('train',
+    train_set = dataset_class('train',
                              root_dir,
                              img_transform=img_transform,
                              gt_transform= partial(gt_transform, K),
                              debug=args.debug,
-                             experiment=args.experiment)
+                             **train_kwargs)
     train_loader = DataLoader(train_set,
                               batch_size=B,
                               num_workers=5,
                               shuffle=True,
                               drop_last=True) #only for resunet
 
-    val_set = SliceDataset('val',
+    val_set = dataset_class('val',
                            root_dir,
                            img_transform=img_transform,
                            gt_transform=partial(gt_transform, K),
                            debug=args.debug,
-                           experiment='B5' if args.experiment == 'B5' else 'B0')
+                           **val_kwargs)
     val_loader = DataLoader(val_set,
                             batch_size=B,
                             num_workers=5,
@@ -157,11 +168,12 @@ def runTraining(args):
     net, optimizer, device, train_loader, val_loader, K = setup(args)
 
     if args.mode == "full":
-        loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
+        idk = list(range(K))  # Supervise both background and foreground
     elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
-        loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
+        idk = [0, 1, 3, 4]  # Do not supervise the heart (class 2)
     else:
         raise ValueError(args.mode, args.dataset)
+    loss_fn = make_loss(args.loss, idk=idk)
 
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
@@ -212,7 +224,7 @@ def runTraining(args):
 
                     # Sanity tests to see we loaded and encoded the data correctly
                     assert 0 <= img.min() and img.max() <= 1
-                    B, _, W, H = img.shape
+                    B = img.shape[0]
 
                     pred_logits = net(img)
                     pred_probs = F.softmax(1 * pred_logits, dim=1)  # 1 is the temperature parameter
@@ -288,8 +300,10 @@ def main():
 
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
-    parser.add_argument('--model', choices=['enet', 'unet', 'resunetpp'], default=None,
+    parser.add_argument('--model', choices=['enet', 'unet', 'unet25d', 'unet3d', 'resunetpp'], default=None,
                         help="Model to use for the selected dataset (default: dataset-specific).")
+    parser.add_argument('--context-slices', type=int, default=3,
+                        help="Odd number of axial slices for the unet25d model.")
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])

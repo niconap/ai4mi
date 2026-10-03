@@ -25,3 +25,4 @@ prepare_separate_labels.py
 requirements-pseudolabels.txt
 segthor_labels.py
 
+*.slurm
