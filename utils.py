@@ -21,6 +21,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+from __future__ import annotations
 
 from pathlib import Path
 from functools import partial
@@ -329,4 +330,347 @@ def hausdorff95(pred: Tensor | np.ndarray, label: Tensor | np.ndarray,
 
 hd95_coef = hausdorff95
 hausdorff95_coef = hausdorff95
+
+
+# ---------------------------------------------------------------------------
+# 3D Evaluation Metrics: Relative Volume Error and Normalised Surface Distance
+# ---------------------------------------------------------------------------
+
+def relative_volume_error(pred: Tensor | np.ndarray,
+                          target: Tensor | np.ndarray | None = None,
+                          *,
+                          label: Tensor | np.ndarray | None = None,
+                          voxelspacing: tuple[float, ...] | None = None,
+                          smooth: float = 1e-8,
+                          absolute: bool = True,
+                          empty_target_penalty: float | None = 1.0) -> Tensor:
+    """Compute Relative Volume Error (RVE) for 3D predictions and targets.
+
+    Assumes batched 3D tensors:
+    - Shape (B, K, D, H, W): returns (B, K)
+    - Shape (B, D, H, W):    returns (B,)
+    - Shape (K, D, H, W):    returns (K,)
+    - Shape (D, H, W):       returns scalar tensor
+
+    Args:
+        pred: Predicted binary, one-hot, or probability tensor/array.
+        target: Ground truth binary or one-hot tensor/array. Can also be passed as `label`.
+        label: Alias for `target`.
+        voxelspacing: Physical voxel spacing (dx, dy, dz). When given, voxel volume
+                      (dx * dy * dz) scales the sum.
+        smooth: Small constant to avoid division by zero when empty_target_penalty is None.
+        absolute: If True, computes |V_pred - V_target| / V_target.
+                  If False, computes (V_pred - V_target) / V_target.
+        empty_target_penalty: Value assigned when target is empty (V_target == 0) and
+                              pred is non-empty (V_pred > 0). Defaults to 1.0. If None,
+                              uses standard division with smooth.
+
+    Returns:
+        Tensor containing RVE values matching the batch/class dimensions.
+    """
+    if target is None:
+        if label is not None:
+            target = label
+        elif isinstance(pred, (tuple, list)) and len(pred) == 2:
+            pred, target = pred[0], pred[1]
+        else:
+            raise ValueError("target (or label) must be provided")
+
+    is_torch = isinstance(pred, Tensor)
+    device = pred.device if is_torch else None
+
+    if is_torch:
+        pred_t = pred.float()
+        target_t = target.float() if isinstance(target, Tensor) else torch.as_tensor(target, dtype=torch.float32, device=device)
+    else:
+        pred_t = torch.as_tensor(pred, dtype=torch.float32)
+        target_t = torch.as_tensor(target, dtype=torch.float32)
+
+    assert pred_t.shape == target_t.shape, f"Shape mismatch: {pred_t.shape} vs {target_t.shape}"
+
+    if pred_t.ndim >= 3:
+        spatial_dims = (-3, -2, -1)
+        v_pred = pred_t.sum(dim=spatial_dims)
+        v_target = target_t.sum(dim=spatial_dims)
+    else:
+        v_pred = pred_t.sum()
+        v_target = target_t.sum()
+
+    if voxelspacing is not None:
+        voxel_vol = float(np.prod(voxelspacing))
+        v_pred = v_pred * voxel_vol
+        v_target = v_target * voxel_vol
+
+    diff = (v_pred - v_target).abs() if absolute else (v_pred - v_target)
+
+    both_empty = (v_target == 0) & (v_pred == 0)
+    target_empty = (v_target == 0) & (v_pred > 0)
+
+    if empty_target_penalty is not None:
+        safe_denom = torch.where(v_target > 0, v_target, torch.ones_like(v_target))
+        res = diff / safe_denom
+        res = torch.where(target_empty, torch.full_like(res, empty_target_penalty), res)
+        res = torch.where(both_empty, torch.zeros_like(res), res)
+    else:
+        res = diff / (v_target + smooth)
+        res = torch.where(both_empty, torch.zeros_like(res), res)
+
+    return res.to(device) if is_torch else res
+
+
+def rve_batch(pred: Tensor | np.ndarray,
+              target: Tensor | np.ndarray | None = None,
+              **kwargs) -> Tensor:
+    """Compute Relative Volume Error aggregated across the entire batch per class.
+
+    For input (B, K, D, H, W), sums over both batch and spatial dimensions,
+    returning shape (K,).
+    """
+    if target is None and isinstance(pred, (tuple, list)) and len(pred) == 2:
+        pred, target = pred[0], pred[1]
+
+    is_torch = isinstance(pred, Tensor)
+    device = pred.device if is_torch else None
+    if is_torch:
+        pred_t = pred.float()
+        target_t = target.float() if isinstance(target, Tensor) else torch.as_tensor(target, dtype=torch.float32, device=device)
+    else:
+        pred_t = torch.as_tensor(pred, dtype=torch.float32)
+        target_t = torch.as_tensor(target, dtype=torch.float32)
+
+    if pred_t.ndim >= 5:
+        spatial_and_batch = (0, -3, -2, -1)
+        v_pred = pred_t.sum(dim=spatial_and_batch)
+        v_target = target_t.sum(dim=spatial_and_batch)
+        absolute = kwargs.get("absolute", True)
+        diff = (v_pred - v_target).abs() if absolute else (v_pred - v_target)
+        both_empty = (v_target == 0) & (v_pred == 0)
+        target_empty = (v_target == 0) & (v_pred > 0)
+        penalty = kwargs.get("empty_target_penalty", 1.0)
+        if penalty is not None:
+            safe_denom = torch.where(v_target > 0, v_target, torch.ones_like(v_target))
+            res = diff / safe_denom
+            res = torch.where(target_empty, torch.full_like(res, penalty), res)
+            res = torch.where(both_empty, torch.zeros_like(res), res)
+        else:
+            smooth = kwargs.get("smooth", 1e-8)
+            res = diff / (v_target + smooth)
+            res = torch.where(both_empty, torch.zeros_like(res), res)
+        return res.to(device) if is_torch else res
+    return relative_volume_error(pred_t, target_t, **kwargs)
+
+
+
+rve = relative_volume_error
+rve_coef = relative_volume_error
+relative_volume_difference = relative_volume_error
+rvd = relative_volume_error
+
+
+def normalized_surface_distance_single(pred: np.ndarray,
+                                       label: np.ndarray,
+                                       tau: float = 1.0,
+                                       voxelspacing: tuple[float, ...] | None = None) -> float:
+    """Compute the Normalized Surface Distance (NSD) between two 3D binary masks.
+
+    Also known as Normalized Surface Dice or Surface Dice at tolerance tau.
+
+    Args:
+        pred: Binary mask of predicted segmentation (3D or 2D bool/int array).
+        label: Binary mask of ground truth segmentation (3D or 2D bool/int array).
+        tau: Tolerance distance threshold (in physical units if voxelspacing is given,
+             otherwise in voxels). Default: 1.0.
+        voxelspacing: Voxel spacing along each spatial dimension.
+
+    Returns:
+        The NSD score in [0.0, 1.0] (1.0 if both masks are empty, 0.0 if exactly one
+        is empty).
+    """
+    pred_bool = np.asarray(pred, dtype=bool)
+    label_bool = np.asarray(label, dtype=bool)
+
+    pred_empty = not np.any(pred_bool)
+    label_empty = not np.any(label_bool)
+
+    if pred_empty and label_empty:
+        return 1.0
+    if pred_empty or label_empty:
+        return 0.0
+
+    try:
+        from scipy.ndimage import binary_erosion, distance_transform_edt
+        footprint = np.ones((3,) * pred_bool.ndim, dtype=bool)
+        pred_border = pred_bool ^ binary_erosion(pred_bool, structure=footprint)
+        label_border = label_bool ^ binary_erosion(label_bool, structure=footprint)
+
+        if not np.any(pred_border):
+            pred_border = pred_bool
+        if not np.any(label_border):
+            label_border = label_bool
+
+        dt_label = distance_transform_edt(~label_border, sampling=voxelspacing)
+        dt_pred = distance_transform_edt(~pred_border, sampling=voxelspacing)
+
+        d_pred_to_label = dt_label[pred_border]
+        d_label_to_pred = dt_pred[label_border]
+    except ImportError:
+        def get_border(m):
+            padded = np.pad(m, 1, mode='constant', constant_values=0)
+            slices = [slice(1, -1)] * m.ndim
+            eroded = np.ones_like(m, dtype=bool)
+            for d in range(m.ndim):
+                for s in (-1, 1):
+                    neighbor_slice = list(slices)
+                    neighbor_slice[d] = slice(1 + s, -1 + s if -1 + s != 0 else None)
+                    eroded &= padded[tuple(neighbor_slice)]
+            border = m ^ eroded
+            return border if np.any(border) else m
+
+        pred_border = get_border(pred_bool)
+        label_border = get_border(label_bool)
+
+        pts_pred = np.argwhere(pred_border).astype(float)
+        pts_label = np.argwhere(label_border).astype(float)
+        if voxelspacing is not None:
+            spacing = np.array(voxelspacing, dtype=float)
+            pts_pred *= spacing
+            pts_label *= spacing
+
+        d_pred_to_label = [float(np.min(np.linalg.norm(pts_label - p, axis=1))) for p in pts_pred]
+        d_label_to_pred = [float(np.min(np.linalg.norm(pts_pred - l, axis=1))) for l in pts_label]
+
+    pred_within = np.sum(np.asarray(d_pred_to_label) <= tau)
+    label_within = np.sum(np.asarray(d_label_to_pred) <= tau)
+    total_pts = len(d_pred_to_label) + len(d_label_to_pred)
+    if total_pts == 0:
+        return 1.0
+    return float((pred_within + label_within) / total_pts)
+
+
+def normalized_surface_distance(pred: Tensor | np.ndarray,
+                                target: Tensor | np.ndarray | None = None,
+                                *,
+                                label: Tensor | np.ndarray | None = None,
+                                tau: float = 1.0,
+                                tolerance: float | None = None,
+                                voxelspacing: tuple[float, ...] | None = None) -> Tensor:
+    """Compute Normalized Surface Distance (NSD) for a batch of 3D predictions and targets.
+
+    Also aliased as `normaliser_phase_distance`, `normalised_phase_distance`,
+    `normalized_phase_distance`, `normalised_surface_distance`, and `nsd_coef`.
+
+    Expects batched 3D tensors:
+    - Shape (B, K, D, H, W): returns (B, K)
+    - Shape (B, D, H, W):    returns (B,)
+    - Shape (K, D, H, W):    returns (K,)
+    - Shape (D, H, W):       returns scalar tensor
+
+    Args:
+        pred: Predicted one-hot, binary, or probability tensor of shape (B, K, D, H, W)
+              or (B, D, H, W).
+        target: Target one-hot or binary tensor matching pred. Can also be passed as `label`.
+        label: Alias for `target`.
+        tau: Tolerance distance (default: 1.0).
+        tolerance: Alias for `tau`.
+        voxelspacing: Physical voxel spacing tuple (dx, dy, dz) or None.
+
+    Returns:
+        Tensor containing NSD values in [0.0, 1.0].
+    """
+    if target is None:
+        if label is not None:
+            target = label
+        elif isinstance(pred, (tuple, list)) and len(pred) == 2:
+            pred, target = pred[0], pred[1]
+        else:
+            raise ValueError("target (or label) must be provided")
+
+    if tolerance is not None:
+        tau = tolerance
+
+    is_torch = isinstance(pred, Tensor)
+    device = pred.device if is_torch else None
+
+    if is_torch:
+        if pred.is_floating_point():
+            pred_np = (pred.detach().cpu().numpy() > 0.5)
+        else:
+            pred_np = pred.detach().cpu().numpy().astype(bool)
+
+        if isinstance(target, Tensor):
+            if target.is_floating_point():
+                label_np = (target.detach().cpu().numpy() > 0.5)
+            else:
+                label_np = target.detach().cpu().numpy().astype(bool)
+        else:
+            label_np = np.asarray(target, dtype=bool)
+    else:
+        pred_np = np.asarray(pred)
+        if np.issubdtype(pred_np.dtype, np.floating):
+            pred_np = (pred_np > 0.5)
+        else:
+            pred_np = pred_np.astype(bool)
+
+        label_np = np.asarray(target)
+        if np.issubdtype(label_np.dtype, np.floating):
+            label_np = (label_np > 0.5)
+        else:
+            label_np = label_np.astype(bool)
+
+    assert pred_np.shape == label_np.shape, f"Shape mismatch: {pred_np.shape} vs {label_np.shape}"
+
+    if pred_np.ndim >= 5:
+        # Batched multiclass 3D: (B, K, D, H, W)
+        B, K = pred_np.shape[0], pred_np.shape[1]
+        res = np.zeros((B, K), dtype=np.float32)
+        for b in range(B):
+            for k in range(K):
+                res[b, k] = normalized_surface_distance_single(pred_np[b, k], label_np[b, k],
+                                                               tau=tau,
+                                                               voxelspacing=voxelspacing)
+    elif pred_np.ndim == 4:
+        dim0 = pred_np.shape[0]
+        res = np.zeros(dim0, dtype=np.float32)
+        for i in range(dim0):
+            res[i] = normalized_surface_distance_single(pred_np[i], label_np[i],
+                                                        tau=tau,
+                                                        voxelspacing=voxelspacing)
+    elif pred_np.ndim == 3:
+        res = np.float32(normalized_surface_distance_single(pred_np, label_np,
+                                                            tau=tau,
+                                                            voxelspacing=voxelspacing))
+    else:
+        res = np.float32(normalized_surface_distance_single(pred_np, label_np,
+                                                            tau=tau,
+                                                            voxelspacing=voxelspacing))
+
+    return torch.from_numpy(res).to(device) if is_torch else torch.from_numpy(np.atleast_1d(res))
+
+
+def nsd_batch(pred: Tensor | np.ndarray,
+              target: Tensor | np.ndarray | None = None,
+              **kwargs) -> Tensor:
+    """Compute average NSD across the batch per class, returning shape (K,)."""
+    val = normalized_surface_distance(pred, target, **kwargs)
+    if val.ndim >= 2:
+        return val.mean(dim=0) if isinstance(val, Tensor) else val.mean(axis=0)
+    return val
+
+
+
+# Aliases for Normaliser / Normalised / Normalized Phase Distance and Surface Distance
+normaliser_phase_distance = normalized_surface_distance
+normalised_phase_distance = normalized_surface_distance
+normalized_phase_distance = normalized_surface_distance
+normaliser_phase_distance_single = normalized_surface_distance_single
+normalised_phase_distance_single = normalized_surface_distance_single
+normalized_phase_distance_single = normalized_surface_distance_single
+normaliser_phase_distance_batch = nsd_batch
+normalised_phase_distance_batch = nsd_batch
+normalized_phase_distance_batch = nsd_batch
+
+normalised_surface_distance = normalized_surface_distance
+nsd = normalized_surface_distance
+nsd_coef = normalized_surface_distance
+
 

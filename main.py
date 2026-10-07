@@ -59,6 +59,11 @@ from utils import (Dcm,
                    iou_coef,
                    hd95_coef,
                    hausdorff95,
+                   relative_volume_error,
+                   normaliser_phase_distance,
+                   normalized_surface_distance,
+                   rve_coef,
+                   nsd_coef,
                    save_images)
 
 from losses import make_loss

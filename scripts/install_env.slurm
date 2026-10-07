@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=ai4mi-install
-#SBATCH --partition=gpu_mig
+#SBATCH --partition=gpu_a100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G

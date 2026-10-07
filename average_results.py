@@ -12,6 +12,10 @@ METRICS = (
     "iou_tra", "iou_val",
     "hd95_tra", "hd95_val",
     "hausdorff95_tra", "hausdorff95_val",
+    "rve_tra", "rve_val",
+    "relative_volume_error_tra", "relative_volume_error_val",
+    "nsd_tra", "nsd_val",
+    "normaliser_phase_distance_tra", "normaliser_phase_distance_val",
     "loss_tra", "loss_val",
 )
 

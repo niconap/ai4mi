@@ -3,7 +3,7 @@
 # Array tasks 0-4 train ENet; tasks 5-9 train UNet.
 # Override defaults, for example: EPOCHS=50 DATASET=SEGTHOR sbatch train_models.slurm
 #SBATCH --job-name=ai4mi-model
-#SBATCH --partition=gpu_mig
+#SBATCH --partition=gpu_a100
 #SBATCH --array=0-9
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=5
@@ -23,8 +23,8 @@ if [[ ! -x "${PYTHON}" ]]; then
     exit 1
 fi
 
-models=(enet unet)
-runs_per_model=5
+models=(unet)
+runs_per_model=2
 task_id="${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}"
 model_index=$((task_id / runs_per_model))
 run_number=$((task_id % runs_per_model + 1))
@@ -34,8 +34,8 @@ if [[ -z "${model}" ]]; then
     exit 1
 fi
 
-dataset="${DATASET:-SEGTHOR}"
-epochs="${EPOCHS:-20}"
+dataset="${DATASET:-SEGTHOR_FIXED}"
+epochs="${EPOCHS:-100}"
 mode="${MODE:-full}"
 seed_base="${SEED_BASE:-1000}"
 seed=$((seed_base + task_id))
