@@ -1,0 +1,74 @@
+#!/bin/bash
+#SBATCH --job-name=preprocessing
+#SBATCH --output=slurm_logs/train_%A_%a.out  # %A is master job ID, %a is array ID
+#SBATCH --error=slurm_logs/train_%A_%a.err
+#SBATCH --time=05:00:00
+#SBATCH --partition=gpu
+#SBATCH --array=0-23                         # 24 tasks total, indexed 0 to 23
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+
+# 1. Load the software stack module and Python
+module load 2023
+module load Python/3.11.3-GCCcore-12.3.0
+
+# 2. Create a logs directory for output files if it doesn't exist
+mkdir -p slurm_logs
+
+# 3. Set up a Python virtual environment
+VENV_PATH="$HOME/ai4mi"
+if [ ! -d "$VENV_PATH" ]; then
+    echo "Creating Python virtual environment..."
+    python -m venv "$VENV_PATH"
+    source "$VENV_PATH/bin/activate"
+    pip install --upgrade pip
+    
+    if [ -f "requirements.txt" ]; then
+        pip install -r requirements.txt
+    fi
+else
+    source "$VENV_PATH/bin/activate"
+fi
+
+# 4. Define all 24 commands in an array (omitted 'python -O' as we will add it below)
+COMMANDS=(
+  # B0 Experiments (0-7)
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --model resunetpp --experiment B0 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P0_float --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --normalization zscore --model resunetpp --experiment B0 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P_zscore --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_crop --model resunetpp --experiment B0 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P_crop --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_native_patches --model resunetpp --experiment B0 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P_native_patches --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_spacing --model resunetpp --experiment B0 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P_spacing --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --slice-sampling organ --organ-sampling-prob 0.5 --model resunetpp --experiment B0 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P_sampling --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --context 3 --model resunetpp --experiment B0 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P_context --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_dual --model resunetpp --experiment B0 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P_dual --gpu"
+  
+  # B1 Experiments (8-15)
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --model resunetpp --experiment B1 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P1_float --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --normalization zscore --model resunetpp --experiment B1 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P1_zscore --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_crop --model resunetpp --experiment B1 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P1_crop --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_native_patches --model resunetpp --experiment B1 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P1_native_patches --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_spacing --model resunetpp --experiment B1 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P1_spacing --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --slice-sampling organ --organ-sampling-prob 0.5 --model resunetpp --experiment B1 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P1_sampling --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --context 3 --model resunetpp --experiment B1 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P1_context --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_dual --model resunetpp --experiment B1 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P1_dual --gpu"
+
+  # B2 Experiments (16-23)
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --model resunetpp --experiment B2 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P2_float --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --normalization zscore --model resunetpp --experiment B2 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P2_zscore --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_crop --model resunetpp --experiment B2 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P2_crop --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_native_patches --model resunetpp --experiment B2 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P2_native_patches --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_spacing --model resunetpp --experiment B2 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P2_spacing --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --slice-sampling organ --organ-sampling-prob 0.5 --model resunetpp --experiment B2 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P2_sampling --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_P0 --context 3 --model resunetpp --experiment B2 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P2_context --gpu"
+  "main.py --dataset SEGTHOR_FULL --data-root data/CT_FULL_dual --model resunetpp --experiment B2 --mode full --epochs 50 --seed 1000 --dest results/segthor/resunetpp/P2_dual --gpu"
+)
+
+# 5. Extract the specific command for this job's Array ID
+CURRENT_COMMAND=${COMMANDS[$SLURM_ARRAY_TASK_ID]}
+
+echo "Starting training job array task: $SLURM_ARRAY_TASK_ID"
+echo "Executing: python -O $CURRENT_COMMAND"
+
+# 6. Run it
+python -O $CURRENT_COMMAND

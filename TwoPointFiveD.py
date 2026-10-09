@@ -14,12 +14,13 @@ class TwoPointFiveD(nn.Module):
         if context_slices < 1 or context_slices % 2 == 0:
             raise ValueError("context_slices must be a positive odd number")
         self.context_slices = context_slices
+        self.in_channels = context_slices * in_dim
         self.backbone = UNet(context_slices * in_dim, out_dim, **kwargs)
 
     def forward(self, input: Tensor) -> Tensor:
-        if input.shape[1] != self.context_slices:
+        if input.shape[1] != self.in_channels:
             raise ValueError(
-                f"Expected {self.context_slices} context channels, got {input.shape[1]}"
+                f"Expected {self.in_channels} input channels, got {input.shape[1]}"
             )
         return self.backbone(input)
 

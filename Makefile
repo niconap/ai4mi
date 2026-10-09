@@ -15,6 +15,45 @@ data/TOY2:
 	python gen_two_circles.py --dest $@_tmp -n 1000 100 -r 25 -wh 256 256
 	mv $@_tmp $@
 
+PYTHON ?= python
+MODEL ?= enet
+EPOCHS ?= 50
+SEED ?= 1000
+WORKERS ?= 2
+THREADS ?= 4
+GPU ?= 0
+RESULTS_ROOT ?= results/local
+EXPERIMENTS ?= B0 B1 B2
+VARIANTS ?= float zscore crop native_patches spacing sampling context dual
+
+LOCAL_DATA_float = CT_FULL_P0
+LOCAL_DATA_zscore = CT_FULL_P0
+LOCAL_DATA_crop = CT_FULL_crop
+LOCAL_DATA_native_patches = CT_FULL_native_patches
+LOCAL_DATA_spacing = CT_FULL_spacing
+LOCAL_DATA_sampling = CT_FULL_P0
+LOCAL_DATA_context = CT_FULL_P0
+LOCAL_DATA_dual = CT_FULL_dual
+LOCAL_ARGS_zscore = --normalization zscore
+LOCAL_ARGS_sampling = --slice-sampling organ --organ-sampling-prob 0.5
+LOCAL_ARGS_context = --context 3
+
+.PHONY: train-local
+train-local: $(foreach experiment,$(EXPERIMENTS),$(foreach variant,$(VARIANTS),train-$(experiment)-$(variant)))
+
+define LOCAL_TRAIN_RULE
+.PHONY: train-$(1)-$(2)
+train-$(1)-$(2):
+	@test -f data/$$(LOCAL_DATA_$(2))/preprocessing.json || { echo "Missing prepared dataset: data/$$(LOCAL_DATA_$(2))/preprocessing.json"; exit 1; }
+	OMP_NUM_THREADS=$$(THREADS) MKL_NUM_THREADS=$$(THREADS) OPENBLAS_NUM_THREADS=$$(THREADS) $$(PYTHON) main.py \
+		--dataset SEGTHOR_FULL --data-root data/$$(LOCAL_DATA_$(2)) \
+		--model $$(MODEL) --experiment $(1) --mode full --epochs $$(EPOCHS) \
+		--seed $$(SEED) --workers $$(WORKERS) $$(LOCAL_ARGS_$(2)) \
+		--dest $$(RESULTS_ROOT)/$$(MODEL)/$(1)/$(2) $$(if $$(filter 1,$$(GPU)),--gpu)
+endef
+
+$(foreach experiment,$(EXPERIMENTS),$(foreach variant,$(VARIANTS),$(eval $(call LOCAL_TRAIN_RULE,$(experiment),$(variant)))))
+
 
 # Extraction and slicing for Segthor
 ## Original one

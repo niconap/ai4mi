@@ -184,7 +184,10 @@ class ENet(nn.Module):
                 #                          conv_block)
 
                 # Initial operations
-                self.conv0 = nn.Conv2d(in_dim, K - 1, kernel_size=3, stride=2, padding=1)
+                # The pooled branch contributes in_dim channels to the concatenation.
+                if not 0 < in_dim < K:
+                        raise ValueError("ENet requires 0 < input channels < kernels")
+                self.conv0 = nn.Conv2d(in_dim, K - in_dim, kernel_size=3, stride=2, padding=1)
                 self.maxpool0 = nn.MaxPool2d(2, return_indices=False, ceil_mode=False)
 
                 # Downsampling half

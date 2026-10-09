@@ -42,6 +42,7 @@ from torch.utils.data import DataLoader
 from functools import partial 
 
 from dataset import SliceDataset, VolumeDataset
+from preprocessing_data import FloatSliceDataset, organ_sampler, tiled_logits
 from segthor_labels import decode_png, inspect_dataset
 from augmentation import EXPERIMENTS
 from ShallowNet import shallowCNN
@@ -75,6 +76,7 @@ datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'fac
 datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR_FIXED"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR_FULL"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+SEPARATE_DATASETS = {"SEGTHOR_FIXED", "SEGTHOR_FULL"}
 
 def img_transform(img):
         img = img.convert('L')
@@ -95,13 +97,24 @@ def gt_transform(K, img):
         return img[0]
 
 def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
-    root_dir = Path("data") / args.dataset
-    label_report = None
-    if args.dataset.startswith("SEGTHOR"):
+    root_dir = args.data_root or Path("data") / args.dataset
+    plan_path = root_dir / "preprocessing.json"
+    float_data = plan_path.is_file()
+    plan = json.loads(plan_path.read_text()) if float_data else None
+    label_report = plan["reference_report"] if float_data else None
+    if not float_data and args.dataset.startswith("SEGTHOR"):
         label_report = inspect_dataset(
-            root_dir, require_separate=args.dataset == "SEGTHOR_FIXED")
+            root_dir, require_separate=args.dataset in SEPARATE_DATASETS)
         if label_report["schema"] == "merged":
             warnings.warn("Class 4 has no targets.")
+    if label_report is not None:
+        recorded_dataset = label_report.get("dataset_id")
+        if args.dataset == "SEGTHOR_FULL" and (
+                recorded_dataset != "SEGTHOR_FULL" or label_report.get("label_source") != "annotated"):
+            raise ValueError("SEGTHOR_FULL requires the new supplied-label dataset. Use data/SEGTHOR_FULL "
+                             "or a CT_FULL_* dataset prepared from it; old CT_* folders contain pseudo-labels.")
+        if recorded_dataset == "SEGTHOR_FULL" and args.dataset != "SEGTHOR_FULL":
+            raise ValueError("This dataset was prepared as SEGTHOR_FULL; select --dataset SEGTHOR_FULL.")
     if args.dest.exists() and any(args.dest.iterdir()):
         raise ValueError(f"Result directory is not empty: {args.dest}; use a new destination.")
     # Networks and scheduler
@@ -114,9 +127,12 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
     models = {'enet': ENet, 'unet': UNet, 'unet25d': TwoPointFiveD, 'unet3d': UNet3D, 'resunetpp': ResUNetPP}
     model = models[args.model] if args.model is not None else datasets_params[args.dataset]['net']
-    context_slices = args.context_slices if args.model == 'unet25d' else 1
+    context_slices = (args.context if float_data else args.context_slices) if args.model == 'unet25d' else 1
 
-    net = model(1, K, kernels=kernels, factor=factor, context_slices=context_slices)
+    in_channels = len(plan["intensity_statistics"]["mean"]) * args.context if float_data else 1
+    if args.model == 'unet25d':
+        in_channels = len(plan["intensity_statistics"]["mean"]) if float_data else 1
+    net = model(in_channels, K, kernels=kernels, factor=factor, context_slices=context_slices)
     net.init_weights()
     net.to(device)
 
@@ -135,33 +151,37 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
         'context_slices': context_slices,
     }
 
-    train_set = dataset_class('train',
-                             root_dir,
-                             img_transform=img_transform,
-                             gt_transform= partial(gt_transform, K),
-                             debug=args.debug,
-                             **train_kwargs)
-    train_loader = DataLoader(train_set,
-                              batch_size=B,
-                              num_workers=5,
-                              shuffle=True,
+    if float_data:
+        options = dict(root_dir=root_dir, experiment=args.experiment,
+                       normalization=args.normalization, context=args.context, debug=args.debug)
+        train_set = FloatSliceDataset('train', **options)
+        val_set = FloatSliceDataset('val', **options)
+    else:
+        train_set = dataset_class('train',
+                                  root_dir,
+                                  img_transform=img_transform,
+                                  gt_transform=partial(gt_transform, K),
+                                  debug=args.debug,
+                                  **train_kwargs)
+        val_set = dataset_class('val',
+                                root_dir,
+                                img_transform=img_transform,
+                                gt_transform=partial(gt_transform, K),
+                                debug=args.debug,
+                                **val_kwargs)
+    sampler = organ_sampler(train_set, args.organ_sampling_prob) if args.slice_sampling == 'organ' else None
+    train_loader = DataLoader(train_set, batch_size=B, num_workers=args.workers,
+                              shuffle=sampler is None, sampler=sampler,
                               drop_last=True) #only for resunet
-
-    val_set = dataset_class('val',
-                           root_dir,
-                           img_transform=img_transform,
-                           gt_transform=partial(gt_transform, K),
-                           debug=args.debug,
-                           **val_kwargs)
-    val_loader = DataLoader(val_set,
-                            batch_size=B,
-                            num_workers=5,
-                            shuffle=False)
+    val_loader = DataLoader(val_set, batch_size=1 if float_data else B,
+                            num_workers=args.workers, shuffle=False)
 
     args.dest.mkdir(parents=True, exist_ok=True)
     if label_report is not None:
         (args.dest / "label_schema.json").write_text(
             json.dumps(label_report, indent=2) + "\n")
+    if float_data:
+        (args.dest / "preprocessing.json").write_text(plan_path.read_text())
     (args.dest / "config.json").write_text(
         json.dumps(vars(args), default=str, indent=2) + "\n")
 
@@ -178,7 +198,7 @@ def runTraining(args):
         idk = [0, 1, 3, 4]  # Do not supervise the heart (class 2)
     else:
         raise ValueError(args.mode, args.dataset)
-    loss_fn = make_loss(args.loss, idk=idk)
+    loss_fn = make_loss(getattr(args, 'loss', 'cross_entropy'), idk=idk)
 
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
@@ -228,17 +248,26 @@ def runTraining(args):
                         opt.zero_grad()
 
                     # Sanity tests to see we loaded and encoded the data correctly
-                    assert 0 <= img.min() and img.max() <= 1
+                    assert torch.isfinite(img).all()
+                    if args.normalization == 'window':
+                        assert 0 <= img.min() and img.max() <= 1
                     B = img.shape[0]
 
-                    pred_logits = net(img)
+                    prepared_validation = m == 'val' and isinstance(loader.dataset, FloatSliceDataset)
+                    pred_logits = (tiled_logits(net, img, loader.dataset.padding_value)
+                                   if prepared_validation else net(img))
                     pred_probs = F.softmax(1 * pred_logits, dim=1)  # 1 is the temperature parameter
 
                     # Metrics computation, not used for training
-                    pred_seg = probs2one_hot(pred_probs)
-                    log_dice[e, j:j + B, :] = dice_coef(pred_seg, gt)  # One DSC value per sample and per class
-                    log_iou[e, j:j + B, :] = iou_coef(pred_seg, gt)
-                    log_hd95[e, j:j + B, :] = hd95_coef(pred_seg, gt)
+                    metric_probs, metric_gt = pred_probs, gt
+                    if prepared_validation:
+                        metric_gt = data['metric_gts'].to(device)
+                        metric_probs = loader.dataset.restore(
+                            pred_probs[0], data['stems'][0], metric_gt.shape[-2:])[None]
+                    pred_seg = probs2one_hot(metric_probs)
+                    log_dice[e, j:j + B, :] = dice_coef(pred_seg, metric_gt)  # One DSC value per sample and per class
+                    log_iou[e, j:j + B, :] = iou_coef(pred_seg, metric_gt)
+                    log_hd95[e, j:j + B, :] = hd95_coef(pred_seg, metric_gt)
 
                     loss = loss_fn(pred_probs, gt)
                     log_loss[e, i] = loss.item()  # One loss value per batch (averaged in the loss)
@@ -250,7 +279,7 @@ def runTraining(args):
                     if m == 'val':
                         with warnings.catch_warnings():
                             warnings.filterwarnings('ignore', category=UserWarning)
-                            predicted_class: Tensor = probs2class(pred_probs)
+                            predicted_class: Tensor = probs2class(metric_probs)
                             mult: int = 63 if K == 5 else (255 / (K - 1))
                             save_images(predicted_class * mult,
                                         data['stems'],
@@ -308,7 +337,7 @@ def main():
     parser.add_argument('--model', choices=['enet', 'unet', 'unet25d', 'unet3d', 'resunetpp'], default=None,
                         help="Model to use for the selected dataset (default: dataset-specific).")
     parser.add_argument('--context-slices', type=int, default=3,
-                        help="Odd number of axial slices for the unet25d model.")
+                        help="Odd number of axial slices for unet25d on PNG datasets; use --context for float datasets.")
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
@@ -321,6 +350,17 @@ def main():
 
     parser.add_argument('--experiment', choices=EXPERIMENTS, default='B0',
                         help='Independent B0–B6 experiments')
+
+    parser.add_argument('--data-root', type=Path,
+                        help='Optional PNG root or completed float dataset from preprocess_ct.py.')
+    parser.add_argument('--normalization', choices=['window', 'zscore'], default='window',
+                        help='Frozen training z-score is applied after augmentation (float datasets).')
+    parser.add_argument('--context', type=int, choices=[1, 3], default=1,
+                        help='Number of adjacent axial slices per input (float datasets).')
+    parser.add_argument('--slice-sampling', choices=['uniform', 'organ'], default='uniform')
+    parser.add_argument('--organ-sampling-prob', type=float, default=0.5,
+                        help='Mixture fraction drawn from esophagus/trachea-positive slices.')
+    parser.add_argument('--workers', type=int, default=5)
 
     parser.add_argument('--gpu', action='store_true')
     parser.add_argument('--debug', action='store_true',

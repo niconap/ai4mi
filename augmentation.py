@@ -26,7 +26,6 @@ def bilateral_denoise(image):
 
 
 def mild_elastic(image, target):
-    """deformation capped at 1 pixel """
     
     height, width = image.shape[-2:]
     coarse = torch.empty((1, 2, 9, 9), device=image.device,
@@ -54,6 +53,12 @@ def uniform(low, high):
     return torch.empty(()).uniform_(low, high).item()
 
 
+def adjust_ct_channels(image, transform, factor):
+    if image.shape[0] == 1:
+        return transform(image, factor)
+    return torch.cat([transform(channel[None], factor) for channel in image], dim=0)
+
+
 class SliceAugmentation:
     def __init__(self, experiment="B0"):
         if experiment not in EXPERIMENTS:
@@ -64,8 +69,6 @@ class SliceAugmentation:
         if self.level in (0, 5):
             return image, target
         height, width = image.shape[-2:]
-        # nn interpolation for seg mask 
-        # so affine transf don't create new classes 
         if self.level == 1 and torch.rand(()).item() < 0.8:
             angle = uniform(-10, 10)
             scale = uniform(0.9, 1.1)
@@ -81,9 +84,9 @@ class SliceAugmentation:
             image, target = mild_elastic(image, target)
         if self.level == 2:
             if torch.rand(()).item() < 0.5:
-                image = TF.adjust_contrast(image, uniform(0.85, 1.15))
+                image = adjust_ct_channels(image, TF.adjust_contrast, uniform(0.85, 1.15))
             if torch.rand(()).item() < 0.5:
-                image = TF.adjust_gamma(image, uniform(0.85, 1.15))
+                image = adjust_ct_channels(image, TF.adjust_gamma, uniform(0.85, 1.15))
         if self.level == 3 and torch.rand(()).item() < 0.3:
             image = (image + torch.randn_like(image) * uniform(0.0, 0.03)).clamp(0, 1)
         if self.level == 4:

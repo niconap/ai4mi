@@ -70,7 +70,7 @@ def inspect_dataset(root, require_separate=False):
     provenance_path = root / 'label_schema.json'
     if provenance_path.exists():
         provenance = json.loads(provenance_path.read_text())
-        for key in ('label_source', 'source_masks'):
+        for key in ('label_source', 'source_masks', 'dataset_id', 'patient_splits', 'annotation_origin'):
             if key in provenance:
                 report[key] = provenance[key]
     return report

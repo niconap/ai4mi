@@ -30,42 +30,72 @@ import matplotlib.pyplot as plt
 
 
 def run(args: argparse.Namespace) -> None:
-    metrics: np.ndarray = np.load(args.metric_file)
-    match metrics.ndim:
-        case 2:
-            E, N = metrics.shape
-            K = 1
-        case 3:
-            E, N, K = metrics.shape
+    fig, ax = plt.subplots()
 
-    fig = plt.figure()
-    ax = fig.gca()
-    ax.set_title(str(args.metric_file))
-
-    epcs = np.arange(E)
-
-    for k in range(1, K):
-        y = metrics[:, :, k].mean(axis=1)
-        ax.plot(epcs, y, label=f"{k=}", linewidth=1.5)
-
-    if K > 2:
-        ax.plot(epcs, metrics.mean(axis=1).mean(axis=1), label="All classes", linewidth=3)
+    if len(args.metric_file) > 1:
+        ax.set_title("Augmentation comparison")
+        for metric_file in args.metric_file:
+            metrics = np.load(metric_file)
+            if metrics.ndim == 3:
+                # Dice arrays: epochs x samples x classes. Exclude background.
+                foreground = metrics[:, :, 1:] if metrics.shape[2] > 1 else metrics
+                score = foreground.mean(axis=(1, 2))
+            elif metrics.ndim == 2:
+                score = metrics.mean(axis=1)
+            else:
+                raise ValueError(
+                    f"Expected a 2D or 3D metric array in {metric_file}, "
+                    f"got shape {metrics.shape}."
+                )
+            epochs = np.arange(1, len(score) + 1)
+            ax.plot(epochs, score, label=metric_file.parent.name, linewidth=1.5)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Mean metric")
+        ax.grid(alpha=0.25)
         ax.legend()
     else:
-        ax.plot(epcs, metrics.mean(axis=1), linewidth=3)
+        metric_file = args.metric_file[0]
+        metrics = np.load(metric_file)
+        match metrics.ndim:
+            case 2:
+                E, N = metrics.shape
+                K = 1
+            case 3:
+                E, N, K = metrics.shape
+            case _:
+                raise ValueError(
+                    f"Expected a 2D or 3D metric array in {metric_file}, "
+                    f"got shape {metrics.shape}."
+                )
+
+        ax.set_title(str(metric_file))
+        epcs = np.arange(E)
+
+        for k in range(1, K):
+            y = metrics[:, :, k].mean(axis=1)
+            ax.plot(epcs, y, label=f"{k=}", linewidth=1.5)
+
+        if K > 2:
+            ax.plot(epcs, metrics.mean(axis=1).mean(axis=1), label="All classes", linewidth=3)
+            ax.legend()
+        else:
+            ax.plot(epcs, metrics.mean(axis=1), linewidth=3)
 
     fig.tight_layout()
     if args.dest:
+        args.dest.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(args.dest)
 
     if not args.headless:
         plt.show()
+    plt.close(fig)
 
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Plot data over time')
-    parser.add_argument('--metric_file', type=Path, required=True, metavar="METRIC_MODE.npy",
-                        help="The metric file to plot.")
+    parser.add_argument('--metric_file', type=Path, nargs='+', required=True, metavar="METRIC_MODE.npy",
+                        help="One or more metric files. Multiple files plot one mean curve per run, "
+                             "excluding background for arrays with multiple classes.")
     parser.add_argument('--dest', type=Path, metavar="METRIC_MODE.png",
                         help="Optional: save the plot to a .png file")
     parser.add_argument("--headless", action="store_true",

@@ -5,6 +5,7 @@ results/
 volumes/
 ai4mi/
 __pycache__/
+train/*
 
 projects
 .venv
