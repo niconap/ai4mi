@@ -27,3 +27,7 @@ requirements-pseudolabels.txt
 segthor_labels.py
 
 *.slurm
+!scripts/slice_segthor.slurm
+!scripts/infer.slurm
+!scripts/plot_predictions.slurm
+plots/*

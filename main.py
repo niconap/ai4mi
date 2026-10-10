@@ -70,6 +70,8 @@ from utils import (Dcm,
 from losses import make_loss
 
 datasets_params: dict[str, dict[str, Any]] = {}
+MODEL_NAMES = ('shallowcnn', 'enet', 'unet', 'unet25d', 'unet3d', 'resunetpp')
+LOSS_NAMES = ('cross_entropy', 'dice', 'dice_cross_entropy', 'focal_tversky')
 # K for the number of classes
 # Avoids the classes with C (often used for the number of Channel)
 datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'factor': 2}
@@ -125,7 +127,14 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    models = {'enet': ENet, 'unet': UNet, 'unet25d': TwoPointFiveD, 'unet3d': UNet3D, 'resunetpp': ResUNetPP}
+    models = {
+        'shallowcnn': shallowCNN,
+        'enet': ENet,
+        'unet': UNet,
+        'unet25d': TwoPointFiveD,
+        'unet3d': UNet3D,
+        'resunetpp': ResUNetPP,
+    }
     model = models[args.model] if args.model is not None else datasets_params[args.dataset]['net']
     context_slices = (args.context if float_data else args.context_slices) if args.model == 'unet25d' else 1
 
@@ -334,7 +343,7 @@ def main():
 
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
-    parser.add_argument('--model', choices=['enet', 'unet', 'unet25d', 'unet3d', 'resunetpp'], default=None,
+    parser.add_argument('--model', choices=MODEL_NAMES, default=None,
                         help="Model to use for the selected dataset (default: dataset-specific).")
     parser.add_argument('--context-slices', type=int, default=3,
                         help="Odd number of axial slices for unet25d on PNG datasets; use --context for float datasets.")
@@ -342,7 +351,7 @@ def main():
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
 
-    parser.add_argument('--loss', choices=['cross_entropy', 'dice', 'dice_cross_entropy', 'focal_tversky', 'ftl'],
+    parser.add_argument('--loss', choices=[*LOSS_NAMES, 'ftl'],
                         default='focal_tversky',
                         help="Training loss; dice_cross_entropy combines overlap and CE, focal_tversky addresses hard/imbalanced classes.")
     parser.add_argument('--dest', type=Path, required=True,
