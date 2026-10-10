@@ -48,7 +48,8 @@ from ShallowNet import shallowCNN
 from ENet import ENet
 from UNet import UNet
 from UNet3D import UNet3D
-from TwoPointFiveD import TwoPointFiveD
+from TwoPointFiveD import TwoPointFiveD, TwoPointFiveDVNet
+from VNet import VNet
 from ResUNetPP import ResUNetPP
 from utils import (Dcm,
                    class2one_hot,
@@ -112,9 +113,17 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    models = {'enet': ENet, 'unet': UNet, 'unet25d': TwoPointFiveD, 'unet3d': UNet3D, 'resunetpp': ResUNetPP}
+    models = {
+        'enet': ENet,
+        'unet': UNet,
+        'unet25d': TwoPointFiveD,
+        'unet3d': UNet3D,
+        'resunetpp': ResUNetPP,
+        'vnet': VNet,
+        'vnet25d': TwoPointFiveDVNet,
+    }
     model = models[args.model] if args.model is not None else datasets_params[args.dataset]['net']
-    context_slices = args.context_slices if args.model == 'unet25d' else 1
+    context_slices = args.context_slices if args.model in ('unet25d', 'vnet25d') else 1
 
     net = model(1, K, kernels=kernels, factor=factor, context_slices=context_slices)
     net.init_weights()
@@ -305,10 +314,10 @@ def main():
 
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
-    parser.add_argument('--model', choices=['enet', 'unet', 'unet25d', 'unet3d', 'resunetpp'], default=None,
+    parser.add_argument('--model', choices=['enet', 'unet', 'unet25d', 'unet3d', 'resunetpp', 'vnet', 'vnet25d'], default=None,
                         help="Model to use for the selected dataset (default: dataset-specific).")
     parser.add_argument('--context-slices', type=int, default=3,
-                        help="Odd number of axial slices for the unet25d model.")
+                        help="Odd number of axial slices for 2.5D models (unet25d, vnet25d).")
     parser.add_argument('--seed', type=int, default=None,
                         help="Random seed for model initialization and data loading.")
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])

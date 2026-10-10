@@ -163,7 +163,7 @@ options:
 $ python main.py --dataset TOY2 --mode full --epoch 25 --dest results/toy2/ce --gpu
 ```
 
-To train the 2.5D model, select `unet25d`. It predicts the center slice from
+To train the 2.5D model, select `unet25d` (or `vnet25d` for the V-Net backbone). It predicts the center slice from
 an odd-sized axial context window; the default uses the previous, current, and
 next slices. The context is restricted to the same patient and edge slices are
 replicated:
@@ -171,6 +171,10 @@ replicated:
 $ python main.py --dataset SEGTHOR_FIXED --model unet25d \
     --context-slices 3 --mode full --loss dice_cross_entropy --epochs 25 \
     --dest results/segthor/25d --gpu
+# Or with V-Net backbone:
+$ python main.py --dataset SEGTHOR_FIXED --model vnet25d \
+    --context-slices 3 --mode full --loss dice_cross_entropy --epochs 25 \
+    --dest results/segthor/25d_vnet --gpu
 ```
 
 The volume-based 3D U-Net is selected with `unet3d`. It loads one complete
