@@ -1,7 +1,3 @@
-#!/usr/bin/env python3
-
-"""2D V-Net architecture adapted from Milletari et al. (3DV 2016)."""
-
 from typing import Any
 
 import torch
@@ -21,12 +17,6 @@ def random_weights_init(module: nn.Module) -> None:
 
 
 class VNetBlock(nn.Module):
-    """Convolutional stage block with residual addition and PReLU activations.
-
-    Applies num_convs convolutions with padding preserved, each followed
-    by BatchNorm2d and PReLU. Adds the input via an identity or 1x1 projection
-    shortcut before the final PReLU activation.
-    """
 
     def __init__(
         self,
@@ -67,7 +57,6 @@ class VNetBlock(nn.Module):
 
 
 class DownStage(nn.Module):
-    """Downsampling stage using strided convolution followed by a VNetBlock."""
 
     def __init__(
         self,
@@ -91,7 +80,6 @@ class DownStage(nn.Module):
 
 
 class UpStage(nn.Module):
-    """Upsampling stage using transposed convolution, skip concatenation, and VNetBlock."""
 
     def __init__(
         self,
@@ -129,16 +117,6 @@ class UpStage(nn.Module):
 
 
 class VNet(nn.Module):
-    """2D V-Net segmentation model with residual learning and PReLU activations.
-
-    Architecture (Milletari et al., 3DV 2016 adapted for 2D):
-    - Multi-stage encoder-decoder network
-    - Residual connections within each stage
-    - Downsampling via strided convolutions (kernel=2, stride=2)
-    - Upsampling via transposed convolutions (kernel=2, stride=2)
-    - Skip connections between corresponding encoder and decoder levels
-    - PReLU activations throughout the network
-    """
 
     def __init__(self, in_dim: int, out_dim: int, **kwargs: Any) -> None:
         super().__init__()
@@ -148,7 +126,6 @@ class VNet(nn.Module):
 
         kernels = kwargs.get("kernels", 16)
 
-        # Stage convolution counts match V-Net: 1, 2, 3, 3, 3, 3, 3, 2, 1
         self.in_stage = VNetBlock(in_dim, kernels, num_convs=1)
         self.down1 = DownStage(kernels, kernels * 2, num_convs=2)
         self.down2 = DownStage(kernels * 2, kernels * 4, num_convs=3)
